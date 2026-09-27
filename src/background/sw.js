@@ -3102,17 +3102,24 @@ async function handlePrivacyStartInner(msg, respond) {
 
   // Apply privacy settings from msg or fall back to defaults
   const privacyCfg = msg.privacy || {};
+  // Opt-in flags must PRESERVE an already-configured value when the caller does
+  // not mention them. Blindly writing `Boolean(privacyCfg.ocrPii)` turned an
+  // absent key into `false` and clobbered a prior PRIVACY_CONFIGURE that had
+  // turned OCR ON — which silently disabled the OCR visual-PII pass and broke
+  // the svg-image adversarial case (text inside an SVG is invisible to the DOM
+  // scan, so OCR is the only thing that can redact it).
+  const currentPrivacy = getPrivacySettings();
+  const keepIfUnset = (key) => (
+    Object.prototype.hasOwnProperty.call(privacyCfg, key) ? Boolean(privacyCfg[key]) : Boolean(currentPrivacy[key])
+  );
   configurePrivacy({
     enabled: true,
     blurFaces: privacyCfg.blurFaces !== false,
     redactDomPii: privacyCfg.redactDomPii !== false,
     redactTextPii: privacyCfg.redactTextPii !== false,
-    runYolo: Boolean(privacyCfg.runYolo),
-    useNer: Boolean(privacyCfg.useNer),
-    // Previously omitted, so the panel's OCR-PII toggle only ever survived by
-    // accident (configurePrivacy merges, and PRIVACY_CONFIGURE runs at panel
-    // init). Forward it explicitly.
-    ocrPii: Boolean(privacyCfg.ocrPii),
+    runYolo: keepIfUnset('runYolo'),
+    useNer: keepIfUnset('useNer'),
+    ocrPii: keepIfUnset('ocrPii'),
     serverUrl: privacyCfg.serverUrl || 'http://127.0.0.1:8787',
   });
 
