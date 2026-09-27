@@ -72,6 +72,22 @@ function newestReport(prefix) {
   return best;
 }
 
+/**
+ * Snapshot every report filename currently in results/. Compared against the
+ * post-run listing so a tier can only ever be credited with a report ITS OWN
+ * run produced.
+ *
+ * Without this, a child that dies before writing (port clash, Chromium launch
+ * failure) leaves `newestReport()` pointing at the PREVIOUS run's file, and the
+ * summary republishes that stale tier's numbers as if they were this run's —
+ * e.g. reporting "privacy 12/12 · injection 11/11" for a tier that never
+ * executed. That breaks the orchestrator's core contract (see the header:
+ * "every verdict comes verbatim from the child harness").
+ */
+function snapshotReports() {
+  return new Set(readdirSync(RESULTS));
+}
+
 /** Verdict fields copied VERBATIM from a child report (no recomputation). */
 function verdictFor(tier, reportFile) {
   if (!reportFile) return {};
@@ -108,6 +124,10 @@ function runTier(tier) {
     return { tier, status: 'SKIPPED', reason: 'playwright is not installed in this checkout (npm i playwright) — tier not run', durationMs: 0 };
   }
 
+  // Remember what existed BEFORE this child ran, so its report can be told
+  // apart from a leftover file of the same tier.
+  const before = snapshotReports();
+
   const res = spawnSync(spec.cmd, spec.args, {
     cwd: ROOT,
     encoding: 'utf8',
@@ -135,13 +155,25 @@ function runTier(tier) {
   }
 
   const prefix = { e2e: 'e2e-benchmark-', adversarial: 'adversarial-benchmark-', browser: 'browser-benchmark-' }[tier];
-  const report = newestReport(prefix);
+  // Only credit a report this child actually wrote. `newestReport()` alone
+  // would hand back the previous run's file whenever the child dies first, and
+  // the summary would then advertise a stale tier's numbers under this run's
+  // name — reporting a phantom "12/12 pass" for a harness that never ran.
+  const candidate = newestReport(prefix);
+  const report = candidate && !before.has(candidate) ? candidate : null;
+  const missingOwnReport = !report;
+
   return {
     tier,
     status: res.status === 0 ? 'PASS' : 'FAIL',
     report: report ? join('TechyMindBench', 'results', report) : undefined,
     ...verdictFor(tier, report),
     durationMs: Date.now() - t0,
+    ...(missingOwnReport
+      ? { noOwnReport: true, reason: res.status === 0
+          ? `tier exited 0 but wrote no new ${prefix}* report — treating as FAIL, not crediting a stale file`
+          : `tier exited ${res.status} and wrote no new ${prefix}* report (stale reports ignored)` }
+      : {}),
     ...(res.status !== 0 ? { stderr: String(res.stderr || '').slice(-800) } : {}),
   };
 }
@@ -158,6 +190,9 @@ for (const tier of tiers) {
   if (!asJson) console.log(`${tag(tier)} running…`);
   const r = runTier(tier);
   results.push(r);
+  // A tier that wrote no report of its own never produced a verdict, so it
+  // cannot be reported as PASS no matter what exit code it returned.
+  if (r.noOwnReport && r.status === 'PASS') r.status = 'FAIL';
   if (!asJson) {
     const verdict = [r.privacy && `privacy ${r.privacy}`, r.injection && `injection ${r.injection}`,
       r.taskSuccessRatio != null && `taskSuccess ${r.taskSuccessRatio}`, r.verifiedActionRatio != null && `verifiedActions ${r.verifiedActionRatio}`,

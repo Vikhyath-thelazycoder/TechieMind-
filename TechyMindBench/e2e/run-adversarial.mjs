@@ -225,6 +225,24 @@ async function main() {
     const settings = { ...(data[key] || {}) };
     delete settings.provider; delete settings.providerBaseUrl; delete settings.apiKey;
     delete settings.allowServerKey; // default: keys are NOT shared
+    // WHY 'none' INSTEAD OF LEAVING provider DELETED:
+    // getSettings() returns { ...DEFAULT_SETTINGS, ...stored }. Deleting the
+    // key leaves DEFAULT_SETTINGS.provider === 'ollama' in force and
+    // resolveOllamaBaseUrl() falls back to http://127.0.0.1:11434, so
+    // isProviderConfigured() stayed TRUE and the loop called a non-running
+    // Ollama instead of this suite's recorder on :8895 — every case ended with
+    // "no decide call recorded". An explicit non-special provider is the only
+    // value that makes the check return false.
+    settings.provider = 'none';
+    // HERMETICITY: the Laya MLX Metal reflex is a LOCAL daemon on 127.0.0.1:8181.
+    // When one happens to be running it answers every decision in ~4ms with a
+    // high-confidence guess and short-circuits the companion server, so this
+    // suite silently measures nothing (0/12 privacy, 0/11 injection) on those
+    // machines while passing elsewhere. This tier is specified to measure the
+    // SERVER TRANSMIT path, so the reflex must be off or the result is a
+    // function of the developer's hardware rather than of the code.
+    delete settings.mlxFastPath;
+    delete settings.mlxFastPathEnabled;
     await chrome.storage.local.set({ [key]: settings });
     return true;
   }).catch((e) => { console.error('settings setup failed:', e.message); process.exit(1); });

@@ -11,7 +11,7 @@
 // Every screenshot is sanitised BEFORE any network call.  The server only
 // ever sees redacted pixels + redacted text + the redaction manifest.
 
-import { captureAndSanitize, decideViaServer, configurePrivacy, getPrivacySettings, resolvePrivacyTab } from '../lib/privacy-agent.js';
+import { captureAndSanitize, decideViaServer, configurePrivacy, getPrivacySettings } from '../lib/privacy-agent.js';
 import { getProviderCapabilities } from '../lib/providers.js';
 import { executeAction, describeAction } from './actions.js';
 import { sleep } from '../lib/utils.js';
@@ -26,12 +26,14 @@ import { sendToOffscreen } from '../lib/offscreen-client.js';
 import { firewallStatusForInspector } from '../lib/privacy-firewall.js';
 import { parseOrdinalPhrase, UNIVERSAL_CARD_SELECTORS } from '../lib/ordinal-resolver.js';
 import { extractCleanQuery } from '../lib/domain-router.js';
-import { isHighRiskAction, createActionProposal } from '../lib/proposal-gate.js';
+import { isHighRiskAction, createActionProposal, decideActionProposal } from '../lib/proposal-gate.js';
 import { createHandoverState } from '../lib/handover-protocol.js';
 
 // the loop cap now honors Settings → Max steps. The hardcoded 25
 // meant the Settings slider silently did not apply to Privacy Mode.
 const DEFAULT_MAX_STEPS = 25;
+// How long the agent stays docked on a CAPTCHA/OTP before giving up honestly.
+const HANDOVER_WAIT_MS = 5 * 60 * 1000;
 const MAX_STEPS_CAP = 100;
 
 // SIH FOUR-STATE ACTION VERIFICATION ACCOUNTING
@@ -90,6 +92,31 @@ async function waitForUserReply(stateRef, signal, timeoutMs) {
   return null;
 }
 
+/**
+ * Dock the agent until a human resolves a CAPTCHA / OTP.
+ *
+ * Mirrors waitForUserReply but resolves on an explicit signal rather than on
+ * typed text, because the human is acting in the TAB, not in the composer.
+ * `stateRef.handoverResume` is set by the SW's RESUME_AFTER_HANDOVER route and
+ * `stateRef.handoverStop` by STOP_TASK; `stateRef.stopRequested` (the Stop
+ * button) also releases the wait.
+ *
+ * @returns {'resume'|'stop'|'__aborted__'|null} null = timed out
+ */
+async function waitForHandoverResolution(stateRef, signal, timeoutMs) {
+  if (!stateRef) return 'resume';
+  stateRef.handoverResume = false;
+  stateRef.handoverStop = false;
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    if (signal?.aborted) return '__aborted__';
+    if (stateRef.handoverStop || stateRef.stopRequested) return 'stop';
+    if (stateRef.handoverResume) return 'resume';
+    await sleep(500);
+  }
+  return null;
+}
+
 function latencyProfile(t) {
   const pct = (arr, q) => {
     if (!arr.length) return 0;
@@ -117,7 +144,7 @@ function latencyProfile(t) {
  * @param {AbortSignal} ctx.signal  Optional — aborts the loop
  */
 export async function runPrivacyAgent(ctx) {
-  const { task, settings, onStep, onDone, onError, signal } = ctx;
+  const { task, settings, onStep, onDone, onError, onHandover, signal } = ctx;
   // ASK-BEFORE-ACTING: when the task started in 'ask' mode the SW
   // supplies approvalGate — the loop awaits it before EVERY browser action
   // (primary and queued). Verdicts: 'approved' | 'skip' | 'stop'.
@@ -132,6 +159,14 @@ export async function runPrivacyAgent(ctx) {
   const history = [];
   let stepCount = 0;
   const runT0 = Date.now();
+  // `runTiming` is module-scoped (it has to outlive a single iteration), so it
+  // accumulates across runs for the lifetime of the service worker. Reset it at
+  // the start of every run, otherwise latencyProfile() reports a P50/P90 pooled
+  // over ALL prior tasks and the SIH scorecard's "measured ACTUAL" column is
+  // never about the run it claims to describe.
+  runTiming.sanitizeMs.length = 0;
+  runTiming.vlmMs.length = 0;
+  runTiming.actionMs.length = 0;
   // SIH PER-TASK PRIVACY CENSUS (measured, never estimated)
   // Totals across the FRESH frames of THIS run only (memo-reused frames are
   // identical pixels — not re-counted). Emitted in the DONE summary so the
@@ -363,6 +398,13 @@ export async function runPrivacyAgent(ctx) {
         : runPii.lastInspector;
 
       // HUMAN-AGENT HANDOVER PROTOCOL: Security gates, CAPTCHAs, and 2FA/OTPs
+      //
+      // This previously only pushed a cosmetic step and fell straight through —
+      // the agent kept clicking at a CAPTCHA, the side panel's handover card was
+      // never triggered (TECHYMIND_HANDOVER_REQUIRED was broadcast from nowhere),
+      // and the card's "Resume Agent" / "Stop Task" buttons sent message types
+      // the service worker did not route. Now it actually docks the agent, tells
+      // the UI, and waits for a real resume signal.
       const pageTextToCheck = String(sanitized.sanitizedDomText || '');
       if (/(captcha|hcaptcha|recaptcha|turnstile|security\s*check|enter\s*the\s*6-digit\s*code|enter\s*otp)/i.test(pageTextToCheck)) {
         try {
@@ -376,7 +418,22 @@ export async function runPrivacyAgent(ctx) {
           onStep?.(STEP_TYPE.THINKING, `✋ Human Handover: ${handover.reason} Agent paused. Complete verification in tab to continue.`, {
             step: stepCount, phase: 'handover-wait', handover,
           });
-        } catch { /* best-effort handover */ }
+          onHandover?.({ ...handover, step: stepCount });
+          // Dock until the human resolves it. A stop signal ends the task; an
+          // absent answer times out honestly rather than hanging forever.
+          const verdict = await waitForHandoverResolution(stateRef, signal, HANDOVER_WAIT_MS);
+          if (verdict === '__aborted__') throw new Error('Agent aborted by user');
+          if (verdict === 'stop') {
+            history.push({ action: { type: 'done' }, result: 'task stopped by user during human handover', latencyMs: 0, step: stepCount });
+            onStep?.(STEP_TYPE.STOPPED, 'Task stopped during human handover.', { step: stepCount, phase: 'handover-stop' });
+            onDone?.({ steps: stepCount, history, finalThought: 'Stopped during human handover.', finalAnswer: '', totalMs: Date.now() - runT0, latencyProfile: latencyProfile(runTiming) });
+            return;
+          }
+          onStep?.(STEP_TYPE.THINKING, '✅ Human handover complete — resuming.', { step: stepCount, phase: 'handover-resume' });
+        } catch (e) {
+          if (e && (/abort/i.test(String(e.message || '')))) throw e;
+          /* best-effort handover */
+        }
       }
 
       // Keep the offscreen ML runtime warm while a privacy-ON run is active:
@@ -686,9 +743,16 @@ export async function runPrivacyAgent(ctx) {
       }
 
       // TWO-PHASE COMMIT PROPOSAL GATE: Cryptographic SHA-256 seal on high-impact actions
+      //
+      // This used to seal the action and then execute it anyway — the hash was
+      // printed for show and decideActionProposal() was never called, so nothing
+      // was actually gated. A high-impact action now REQUIRES an explicit
+      // approval, and that approval is bound to the seal: if the action is
+      // mutated between sealing and execution the CAS check refuses it.
       if (isHighRiskAction(action)) {
+        let proposal = null;
         try {
-          const proposal = await createActionProposal({
+          proposal = await createActionProposal({
             actionType: action.type,
             title: `Authorize High-Impact Action: ${describeAction(action)}`,
             targetUrl: sanitized?.page?.url || '',
@@ -698,7 +762,32 @@ export async function runPrivacyAgent(ctx) {
           onStep?.(STEP_TYPE.PLAN_READY, `🔒 Action Proposal Gate: High-impact action sealed [SHA-256: ${proposal.hash.slice(0, 16)}...]`, {
             step: stepCount, phase: 'proposal-seal', proposal,
           });
-        } catch { /* best-effort proposal seal */ }
+        } catch (e) {
+          // Fail CLOSED: if the seal cannot be produced, the high-impact action
+          // does not run.
+          console.warn('[TechyMind] proposal seal failed — refusing high-impact action:', e?.message);
+          onStep?.(STEP_TYPE.MUTED, '🔒 Proposal seal could not be created — high-impact action refused.', {
+            step: stepCount, phase: 'proposal-seal-failed',
+          });
+          return;
+        }
+
+        // No approval surface configured (privacy-on + 'auto' mode): the seal
+        // alone is the audit record, and the guardian below still applies.
+        if (approvalGate) {
+          const decision = await approvalGate(action, stepCount);
+          const verdict = await decideActionProposal({
+            proposal,
+            decision: decision === 'approve_once' ? 'approve' : 'deny',
+            storedHash: proposal.hash,
+          }).catch((e) => ({ status: 'denied', ok: false, reason: e?.message || 'proposal rejected' }));
+          if (verdict?.status !== 'succeeded' && verdict?.status !== 'executing') {
+            onStep?.(STEP_TYPE.MUTED, `🔒 High-impact action not authorized (${verdict?.reason || verdict?.status || 'declined'}) — skipping.`, {
+              step: stepCount, phase: 'proposal-denied',
+            });
+            continue;
+          }
+        }
       }
 
       // TASK AUTHORIZATION DAEMON (primary action)

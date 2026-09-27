@@ -34,6 +34,12 @@
           </svg>
           <span>History</span>
         </button>
+        <button class="top-nav-btn" id="topNavSettings" title="Privacy, SIH scorecard &amp; in-panel tools">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+          <span>Privacy</span>
+        </button>
       </div>
       <button class="header-action-btn" id="newChatBtn" title="Start a new task">
         <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
@@ -894,7 +900,8 @@
         <div class="s-section-title">Behaviour</div>
         <div class="s-field">
           <label class="s-label">Max steps per task <span class="s-hint">(3 – 50)</span></label>
-          <input type="number" class="s-input" id="maxStepsInput" value="20" min="3" max="50"/>
+          <!-- Value is filled in by sidepanel.js from DEFAULT_SETTINGS.maxSteps — do not re-add it here. -->
+          <input type="number" class="s-input" id="maxStepsInput" min="3" max="50"/>
         </div>
         <div class="s-field">
           <label class="s-label">Action delay (ms) <span class="s-hint">Increase for slow sites</span></label>
@@ -903,8 +910,8 @@
         <div class="s-field">
           <label class="s-label">VLM speed profile <span class="s-hint">Generalized — works with any provider</span></label>
           <select class="s-input" id="vlmSpeedProfileInput">
-            <option value="fast">Fast — 896px image, tight history, 600-token cap, shot reuse</option>
-            <option value="balanced" selected>Balanced — 1280px image, 800-token cap, shot reuse (default)</option>
+            <option value="fast" selected>Fast — 896px image, tight history, 600-token cap, shot reuse (default)</option>
+            <option value="balanced">Balanced — 1280px image, 800-token cap, shot reuse</option>
             <option value="quality">Quality — 1536px image, fuller history/DOM text, 1400-token cap</option>
           </select>
           <div class="s-hint" style="margin-top:4px;">Scales screenshot size, DOM-text/history window, output cap, reasoning hint and screenshot-reuse together. Reuses the previous screenshot automatically whenever the page is unchanged (skips capture + upload; any playing video forces a fresh shot).</div>
@@ -1015,15 +1022,18 @@
         <div class="s-section-title">Storage &amp; Exports</div>
         <div class="s-field">
           <label class="s-label">Preferred export format</label>
+          <!-- Option set mirrors the formats src/lib/export.js normalises. -->
           <select class="s-input" id="exportFormatInput">
             <option value="json">JSON</option>
             <option value="csv">CSV</option>
             <option value="txt">TXT</option>
+            <option value="markdown">Markdown</option>
           </select>
         </div>
         <div class="s-field">
           <label class="s-label">Export folder <span class="s-hint">Inside browser downloads</span></label>
-          <input type="text" class="s-input" id="exportFolderInput" placeholder="TechyMind Exports"/>
+          <!-- Value + placeholder are filled in by sidepanel.js from DEFAULT_SETTINGS.exportFolder — do not re-add them here. -->
+          <input type="text" class="s-input" id="exportFolderInput"/>
         </div>
         <div class="s-field">
           <label class="s-label">Storage label <span class="s-hint">Used inside browser downloads</span></label>

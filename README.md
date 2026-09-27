@@ -8,7 +8,7 @@
 
 *The screen the AI sees is never the screen you keep.*
 
-![version](https://img.shields.io/badge/version-1.15.1-4f46e5?style=for-the-badge&labelColor=0f172a)
+![version](https://img.shields.io/badge/version-1.29.0-4f46e5?style=for-the-badge&labelColor=0f172a)
 ![privacy](https://img.shields.io/badge/privacy-fail--closed-10b981?style=for-the-badge&labelColor=0f172a)
 
 <br>
@@ -131,14 +131,22 @@ npm run bench:all
 | Pixel Leakage Rate | **0 / 340** | Adversarial visual scan |
 | Inbound Validation | **29 / 29 Pass** | Server gate security test |
 
+> **Caveat:** the numbers above come from a single recorded run and are a snapshot, not a live measurement. Regenerate them with `npm run bench:all` (or a single tier via `npm run bench:unit` / `bench:e2e` / `bench:adversarial` / `bench:browser`) and update this table from the new output before quoting any of these figures.
+
 ---
 
 ## 🛠 Reusable Skills
 
-TechyMind comes with pre-configured, production-ready skills:
+TechyMind ships **12 pre-configured, production-ready skills** (see `skills/index.json`):
 - **Summarize Page**: Fast bullet points of the current page.
 - **Deep Research**: Comprehensive multi-query web investigations.
 - **Extract Data**: HTML table and list conversion to JSON/CSV.
 - **Compare Prices**: Cross-site item comparison.
 - **Fill Form**: Automated, privacy-guarded form submission.
+- **Find Alternatives**: Vet replacement options for a product, tool, or library.
+- **Manage Bookmarks**: Deduplicate, categorise, and restructure bookmarks.
+- **Monitor Page**: Diff a page against its last known state (restocks, price drops).
 - **Organize Tabs**: Clean up and cluster related tabs.
+- **Read Later Queue**: Extract clean article text with reading time and metadata.
+- **Save Full Page**: Archive a page as an offline bundle or markdown note.
+- **Screenshot Walkthrough**: Capture a visual, step-by-step guide of a flow.

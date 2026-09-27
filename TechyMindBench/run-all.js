@@ -63,4 +63,11 @@ if (jsonOut) {
   console.log('──────────────────────────────────────────────────────────────────\n');
 }
 
-process.exit(results.every(r => r.pass) ? 0 : 1);
+// Set exitCode and let the process exit NATURALLY instead of calling
+// process.exit(). When stdout is a pipe (which it is under the orchestrator's
+// spawnSync, and under `npm run` / `| head`), writes are asynchronous — an
+// explicit process.exit() kills the process before the buffer drains and the
+// ~20 KB JSON report lands truncated at the pipe boundary. Every consumer of
+// this file (the side panel's SIH scorecard importer) then fails to parse it.
+// Natural exit flushes stdout first.
+process.exitCode = results.every(r => r.pass) ? 0 : 1;

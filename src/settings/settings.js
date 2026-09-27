@@ -61,8 +61,8 @@ async function initSettings() {
   if ($('profCountry')) $('profCountry').value = prof.country || 'India';
 
   // Export
-  if ($('exportFormat')) $('exportFormat').value = currentSettings.exportFormat || 'json';
-  if ($('exportFolder')) $('exportFolder').value = currentSettings.exportFolder || 'TechyMind';
+  if ($('exportFormat')) $('exportFormat').value = currentSettings.exportFormat || DEFAULT_SETTINGS.exportFormat;
+  if ($('exportFolder')) $('exportFolder').value = currentSettings.exportFolder || DEFAULT_SETTINGS.exportFolder;
 
   // Privacy Wall
   let privacyConfig = { blurFaces: true, redactDomPii: true, redactTextPii: true, maskIndianId: true };
@@ -77,7 +77,7 @@ async function initSettings() {
   } catch {}
 
   if ($('tabGroupingToggle')) $('tabGroupingToggle').checked = currentSettings.enableTabGrouping === true;
-  if ($('speedProfileSelect')) $('speedProfileSelect').value = currentSettings.vlmSpeedProfile || 'fast';
+  if ($('speedProfileSelect')) $('speedProfileSelect').value = currentSettings.vlmSpeedProfile || DEFAULT_SETTINGS.vlmSpeedProfile;
 
   // Voice & Audio
   const voiceEngine = currentSettings.voiceInputEngine || 'webspeech';
@@ -600,22 +600,34 @@ async function saveSettings() {
   const saveBtn = $('saveAllSettingsBtn');
   if (saveBtn) saveBtn.textContent = 'Saving…';
 
+  // This page has no provider picker — it edits whichever provider is already
+  // active, so `model` has to be written from the field that belongs to it.
+  // #compatibleModel was read on load but never written back, so saving while
+  // OpenAI/Gemini/Anthropic/etc. was active used to clobber `model` with the
+  // Ollama tag below.
+  const activeProvider = currentSettings.provider || DEFAULT_SETTINGS.provider;
+  const isOllama = activeProvider === 'ollama';
+  const activeModel = isOllama
+    ? ($('ollamaModelSelect')?.value.trim() || currentSettings.ollamaTextModel || DEFAULT_SETTINGS.ollamaTextModel)
+    : ($('compatibleModel') ? $('compatibleModel').value.trim() : (currentSettings.model || ''));
+
   const updated = {
     ...currentSettings,
     ollamaBaseUrl: $('ollamaBaseUrl')?.value.trim() || 'http://127.0.0.1:11434',
-    ollamaTextModel: $('ollamaModelSelect')?.value || currentSettings.ollamaTextModel || 'gemma3:12b',
+    ollamaTextModel: $('ollamaModelSelect')?.value || currentSettings.ollamaTextModel || DEFAULT_SETTINGS.ollamaTextModel,
     mlxFastPath: $('mlxFastPathToggle')?.checked !== false,
     mlxFastPathEnabled: $('mlxFastPathToggle')?.checked !== false,
     mlxBaseUrl: $('mlxBaseUrl')?.value.trim() || 'http://127.0.0.1:8181',
     providerBaseUrl: $('compatibleBaseUrl')?.value.trim() || '',
     apiKey: $('compatibleApiKey')?.value.trim() || '',
-    model: $('ollamaModelSelect')?.value || currentSettings.model || 'gemma3:12b',
+    model: activeModel,
     braveSearchKey: $('braveKey')?.value.trim() || '',
     langSearchKey: $('langSearchKey')?.value.trim() || '',
     serperKey: $('serperKey')?.value.trim() || '',
     deepResearchMaxSites: parseInt($('drMaxSites')?.value, 10) || 6,
-    exportFormat: $('exportFormat')?.value || 'json',
-    exportFolder: $('exportFolder')?.value.trim() || 'TechyMind',
+    // Defaults come from DEFAULT_SETTINGS — do not re-inline the literals here.
+    exportFormat: $('exportFormat')?.value || DEFAULT_SETTINGS.exportFormat,
+    exportFolder: $('exportFolder')?.value.trim() || DEFAULT_SETTINGS.exportFolder,
     profileData: {
       fullName: $('profName')?.value.trim() || '',
       email: $('profEmail')?.value.trim() || '',
@@ -632,7 +644,7 @@ async function saveSettings() {
     voiceOutputEnabled: $('voiceOutputToggle')?.checked !== false,
     voicePersona: $('voicePersonaSelect')?.value || 'female',
     enableTabGrouping: $('tabGroupingToggle')?.checked === true,
-    vlmSpeedProfile: $('speedProfileSelect')?.value || 'fast',
+    vlmSpeedProfile: $('speedProfileSelect')?.value || DEFAULT_SETTINGS.vlmSpeedProfile,
   };
 
   await chrome.storage.local.set({
@@ -646,7 +658,12 @@ async function saveSettings() {
     const privEnabled = $('privacyEnabledToggle')?.checked !== false;
     localStorage.setItem('techymindPrivacyEnabled', privEnabled ? '1' : '0');
     localStorage.setItem('opencometPrivacyEnabled', privEnabled ? '1' : '0');
+    // MERGE into the stored config. This object used to be REPLACED wholesale,
+    // which silently deleted runYolo / useNer / ocrPii / serverUrl — keys the
+    // side panel owns and this page has no control for.
+    const readCfg = (k) => { try { return JSON.parse(localStorage.getItem(k) || '{}') || {}; } catch { return {}; } };
     const privConfig = {
+      ...readCfg('techymindPrivacyConfig'),
       blurFaces: $('blurFacesToggle')?.checked !== false,
       redactDomPii: $('redactDomPiiToggle')?.checked !== false,
       redactTextPii: true,

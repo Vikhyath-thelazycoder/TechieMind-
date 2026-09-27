@@ -121,6 +121,19 @@ async function main() {
     const data = await chrome.storage.local.get(key);
     const settings = { ...(data[key] || {}) };
     delete settings.provider; delete settings.providerBaseUrl; delete settings.apiKey;
+    // WHY 'none' INSTEAD OF LEAVING provider DELETED:
+    // getSettings() returns { ...DEFAULT_SETTINGS, ...stored }. Deleting the
+    // key leaves DEFAULT_SETTINGS.provider === 'ollama' in force and
+    // resolveOllamaBaseUrl() falls back to http://127.0.0.1:11434, so
+    // isProviderConfigured() stayed TRUE and the loop called a non-running
+    // Ollama instead of the mock server — every scenario ended with
+    // "Privacy agent error: Failed to fetch". An explicit non-special
+    // provider is the only value that makes the check return false.
+    settings.provider = 'none';
+    // HERMETICITY: disable the local Laya MLX Metal reflex. It is a daemon on
+    // 127.0.0.1:8181; when present it answers every turn in ~4ms and bypasses
+    // the companion server this tier exists to exercise.
+    delete settings.mlxFastPath; delete settings.mlxFastPathEnabled;
     await chrome.storage.local.set({ [key]: settings });
     return true;
   }).catch((e) => { console.error('settings setup failed:', e.message); process.exit(1); });
@@ -265,7 +278,31 @@ async function main() {
   await context.close();
   mock.server.close();
   srv.close();
-  process.exit(0);
+
+  // THRESHOLDS. This harness used to end in an unconditional process.exit(0),
+  // so it reported PASS even when EVERY scenario failed to finish — a run with
+  // taskSuccessRatio 0 and executionSuccessRatio 0 still printed a green
+  // "[E2E] PASS". A suite that cannot fail is worse than no suite.
+  const MIN_TASK_SUCCESS = 0.5;
+  const MIN_EXEC_SUCCESS = 0.5;
+  const failures = [];
+  if (!(aggregate.taskSuccessRatio >= MIN_TASK_SUCCESS)) {
+    failures.push(`taskSuccessRatio ${aggregate.taskSuccessRatio} < ${MIN_TASK_SUCCESS} (${results.filter(r => r.finished).length}/${results.length} scenarios finished)`);
+  }
+  if (!(aggregate.executionSuccessRatio >= MIN_EXEC_SUCCESS)) {
+    failures.push(`executionSuccessRatio ${aggregate.executionSuccessRatio} < ${MIN_EXEC_SUCCESS}`);
+  }
+  if (allSteps.length === 0) {
+    failures.push('no steps were observed — the loop never ran');
+  }
+
+  if (failures.length) {
+    console.error(`\n[E2E] FAIL — ${failures.join(' · ')}`);
+    process.exitCode = 1;
+  } else {
+    console.log('\n[E2E] PASS');
+    process.exitCode = 0;
+  }
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

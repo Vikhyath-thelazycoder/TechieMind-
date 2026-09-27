@@ -36,6 +36,12 @@ blob-report/
 test-results/
 .playwright/
 
+# Benchmark reports are regenerable run artifacts, not source. Committing them
+# made two concurrent `npm run bench*` invocations race on the same filenames
+# and truncate each other's JSON. Keep the directory, drop the contents.
+TechyMindBench/results/
+TechyMindBench/test-results/
+
 # ── Python (Dashboard & Analysis Scripts) ───────────────────────────────────
 __pycache__/
 *.py[cod]

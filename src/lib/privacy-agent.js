@@ -31,7 +31,6 @@ import {
   scanTextForSecrets,
   maskSecretShapedText,
   secretSweepPatterns,
-  PrivacyBlockedError,
 } from './privacy-firewall.js';
 // WIRE GUARD: byte-level exact-payload verification (the "exact serialized
 // payload / byte-level leakage test"). Guards EVERY outbound fetch in
@@ -50,6 +49,7 @@ let _settings = {
   redactTextPii: true,
   runYolo: false,        // opt-in (adds latency)
   useNer: false,         // opt-in (large model)
+  ocrPii: false,         // opt-in (Tesseract visual-PII scan)
   serverUrl: 'http://127.0.0.1:8787',
 };
 
@@ -93,6 +93,16 @@ export function getCumulativePrivacyStats() {
 // tab instead of crashing the loop.
 
 const PRIVILEGED_URL_RE = /^(chrome|edge|about|devtools|view-source|chrome-extension|moz-extension):/i;
+
+// Region classifications the MLX reflex must never act on directly. The reflex
+// receives redacted text and cannot see a password, so letting it drive a
+// sensitive surface would be asking a model that only knows "[REDACTED:…]" to
+// interact with the real field. Refuse and fall through to the gated path.
+const SENSITIVE_REGION_TYPES = new Set([
+  'password', 'credit_card', 'aadhaar', 'pan', 'ssn', 'iban', 'api_key',
+  'url_cred', 'sensitive_input', 'otp', 'voter_id', 'passport',
+  'driving_license', 'ifsc', 'upi', 'bank_account', 'gstin',
+]);
 
 export async function resolvePrivacyTab(preferredTabId, sandboxTabIds = null) {
   // TAB-GROUP SANDBOX: when a sandbox member list is supplied, the
@@ -838,40 +848,61 @@ export async function decideViaServer(payload, task, history = [], providerSetti
   if (wireBlockDirect) return wireBlockDirect;
 
   // 1b) Laya MLX System 1 Reflex Layer (Apple Silicon Metal GPU ~2ms)
-  // When running local or Ollama models on Apple Silicon, probe the non-autoregressive
-  // reflex layer first for candidate micro-actions before spending 20s on Ollama.
+  // Runs AFTER every outbound gate above, and sends ONLY opaque region ids —
+  // never raw selectors, labels, or field text. The reflex previously shipped
+  // `selector` + `label` to the daemon while the gates had only ever inspected
+  // the prompt/payload pair, so raw DOM identifiers crossed the wire
+  // unexamined. It now answers with a region id that is resolved back to an
+  // element locally, and its verdict is re-swept before becoming an action.
   if (settings.mlxFastPath !== false && settings.mlxFastPathEnabled !== false && (settings.provider === 'ollama' || settings.provider === 'local')) {
     try {
       const rawCandidates = (Array.isArray(payload.interactiveCandidates) && payload.interactiveCandidates.length)
         ? payload.interactiveCandidates
         : (payload.manifest || payload.privacy?.safeManifest || []);
 
+      // OPAQUE-ONLY EGRESS. The daemon gets a stable index, a coarse tag and a
+      // redacted, length-capped label. `selector` is a live DOM handle (often
+      // built from ids/classes/names) and is never sent — the chosen index is
+      // mapped back to a real element locally after the response arrives.
       const candidates = rawCandidates.map((m, idx) => ({
         id: idx,
-        tag: m.tag || (m.role === 'input' || m.type === 'input' ? 'input' : 'button'),
-        text: m.text || m.label || m.name || m.placeholder || m.type || '',
-        selector: m.selector || m.regionId || '',
-      })).filter(c => c.text || c.selector);
+        tag: String(m.tag || (m.role === 'input' || m.type === 'input' ? 'input' : 'button')).slice(0, 12),
+        text: String(
+          finalPiiSweepText(String(m.text || m.label || m.name || m.placeholder || m.type || '')).slice(0, 40)
+        ).replace(/\s+/g, ' ').trim(),
+      })).filter(c => c.text);
 
       if (candidates.length) {
         const mlxResult = await probeLayaMlxFastPath(task, candidates, 150, settings.mlxBaseUrl || 'http://127.0.0.1:8181');
-        if (mlxResult && mlxResult.confidence >= 0.70 && mlxResult.selector) {
-          console.log(`[TechyMind] ⚡ MLX Metal Reflex HIT (${mlxResult.latency_ms}ms, conf=${mlxResult.confidence.toFixed(2)}) -> target: ${mlxResult.selector}`);
-          return {
-            actionPlan: {
-              thought: `[Laya MLX Metal Reflex ${mlxResult.latency_ms}ms] Fast micro-action on target`,
-              action: {
-                type: mlxResult.action || 'click',
-                selector: mlxResult.selector,
-                text: mlxResult.text || '',
-              },
-              confidence: mlxResult.confidence,
-              is_complete: false,
-            },
-            backend: `apple-silicon-mlx (Metal GPU ${mlxResult.latency_ms}ms)`,
-            manifestSummary: candidates.length,
-            networkLatencyMs: Math.round(mlxResult.latency_ms),
-          };
+        if (mlxResult && mlxResult.confidence >= 0.70 && Number.isInteger(mlxResult.id) && candidates[mlxResult.id]) {
+          // Resolve the daemon's index back to a LOCAL element. If the target
+          // is a known-sensitive region the reflex is refused outright rather
+          // than acting on a redacted surface.
+          const target = rawCandidates[mlxResult.id] || {};
+          const targetType = String(target.type || '').toLowerCase();
+          if (SENSITIVE_REGION_TYPES.has(targetType)) {
+            console.warn(`[TechyMind] MLX reflex target region is sensitive (${targetType}) — refusing reflex action.`);
+          } else {
+            const selector = target.selector || target.uid || target.regionId || '';
+            if (selector) {
+              console.log(`[TechyMind] MLX Metal Reflex HIT (${mlxResult.latency_ms}ms, conf=${mlxResult.confidence.toFixed(2)}) -> region #${mlxResult.id}`);
+              return {
+                actionPlan: {
+                  thought: `[Laya MLX Metal Reflex ${mlxResult.latency_ms}ms] Fast micro-action on region #${mlxResult.id}`,
+                  action: {
+                    type: mlxResult.action || 'click',
+                    selector,
+                    text: String(finalPiiSweepText(String(mlxResult.text || '')).slice(0, 40)),
+                  },
+                  confidence: mlxResult.confidence,
+                  is_complete: false,
+                },
+                backend: `apple-silicon-mlx (Metal GPU ${mlxResult.latency_ms}ms)`,
+                manifestSummary: candidates.length,
+                networkLatencyMs: Math.round(mlxResult.latency_ms),
+              };
+            }
+          }
         }
       }
     } catch {
@@ -1024,6 +1055,8 @@ function pageContextScan() {
   const SENSITIVE_AUTOCOMPLETE = new Set([
     'current-password', 'new-password', 'cc-number', 'cc-exp', 'cc-csc',
     'cc-name', 'cc-given-name', 'cc-family-name', 'cc-type',
+    'name', 'given-name', 'additional-name', 'family-name', 'nickname',
+    'honorific-prefix', 'honorific-suffix',
     'username', 'email', 'tel', 'ssn', 'aadhaar', 'pan',
     'postal-code', 'address-line1', 'address-line2', 'address-line3',
     'organization', 'transaction-amount',

@@ -319,10 +319,10 @@
               </label>
 
               <label class="toggle-item">
-                <input type="checkbox" id="indianPiiToggle" checked />
+                <input type="checkbox" id="indianPiiToggle" checked disabled />
                 <div class="toggle-text">
-                  <strong>Indian Identity &amp; Financial Redaction</strong>
-                  <span>Masks Aadhaar, PAN, voter ID, passport, driving license, IFSC, UPI, and GSTIN tokens.</span>
+                  <strong>Indian Identity &amp; Financial Redaction <em style="opacity:.6;font-style:normal;font-weight:400">(always on)</em></strong>
+                  <span>Masks Aadhaar, PAN, voter ID, passport, driving license, IFSC, UPI, and GSTIN tokens. These are unconditional detector rules and cannot be switched off.</span>
                 </div>
               </label>
 
@@ -560,16 +560,19 @@
         <div class="card">
           <div class="form-group">
             <label for="exportFormat">Preferred Export Format</label>
+            <!-- Option set mirrors the formats src/lib/export.js normalises. -->
             <select id="exportFormat">
               <option value="json">JSON</option>
               <option value="csv">CSV</option>
+              <option value="txt">TXT</option>
               <option value="markdown">Markdown</option>
             </select>
           </div>
 
           <div class="form-group">
             <label for="exportFolder">Default Export Folder</label>
-            <input type="text" id="exportFolder" value="TechyMind" />
+            <!-- Value is filled in by settings.js from DEFAULT_SETTINGS.exportFolder — do not re-add it here. -->
+            <input type="text" id="exportFolder" />
             <p class="field-hint">Exports are saved under Downloads/TechyMind by default.</p>
           </div>
         </div>

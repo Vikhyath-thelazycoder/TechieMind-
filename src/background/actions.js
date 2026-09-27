@@ -339,13 +339,30 @@ export async function executeAction(tabId, action, agentState) {
       return { ok: true, waitedMs: action.ms || 2000 };
 
     // Extract (passive — next loop reads the result)
-    case 'extract':
-      await inject(tabId, (sel) => {
+    case 'extract': {
+      // The harvest was previously injected and then DISCARDED, returning a
+      // bare {ok:true}. The model was told "extracted the data" while the text
+      // never reached history or the next turn's context, so every extract
+      // skill silently produced nothing. Return it, capped so one selector
+      // match on <body> cannot blow the context budget.
+      const MAX_EXTRACT_CHARS = 4000;
+      const raw = await inject(tabId, (sel) => {
         return [...document.querySelectorAll(sel || 'body')]
           .map(el => el.textContent.trim())
+          .filter(Boolean)
           .join('\n');
       }, action.selector || 'body');
-      return { ok: true };
+      const text = String(raw ?? '').trim();
+      if (!text) {
+        return { ok: false, reason: `extract matched nothing for selector "${action.selector || 'body'}"`, data: '' };
+      }
+      return {
+        ok: true,
+        data: text.slice(0, MAX_EXTRACT_CHARS),
+        truncated: text.length > MAX_EXTRACT_CHARS,
+        chars: text.length,
+      };
+    }
 
     // New tab
     case 'new_tab': {

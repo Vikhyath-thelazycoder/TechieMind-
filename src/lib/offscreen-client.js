@@ -80,6 +80,9 @@ function sendViaRuntime(message, { timeoutMs }) {
 // Transport B — Firefox in-page ML runtime (hidden iframe + postMessage)
 
 const ML_FRAME_ID = 'techymind-ml-frame';
+// Kept deliberately: `scripts/build-firefox.mjs` asserts this literal is present
+// in this file (drift guard #8, "in-page ML iframe creation"). It is the id the
+// Firefox in-page ML path upgrades FROM, so it doubles as the migration marker.
 const LEGACY_ML_FRAME_ID = 'opencomet-ml-frame';
 const FRAME_READY_TIMEOUT_MS = 30 * 1000;
 

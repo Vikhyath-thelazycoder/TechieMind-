@@ -1,4 +1,5 @@
 // sidepanel.js — TechyMind UI controller
+import { DEFAULT_SETTINGS } from '../lib/constants.js';
 import { loadLibrarySkills, peekLibrarySkills } from '../lib/skill-library.js';
 import { createLogger, installGlobalErrorTraps } from '../core/logger.js';
 
@@ -79,7 +80,6 @@ const modeIcon       = $('modeIcon');
 const modeLabel      = $('modeLabel');
 const modeDropdown   = $('modeDropdown');
 const newChatBtn     = $('newChatBtn');
-const runContextHint = $('runContextHint');
 const researchOptionsBar = $('researchOptionsBar');
 const scrapeOptionsBar = $('scrapeOptionsBar');
 const initialConvoMarkup = $('convoArea')?.innerHTML || '';
@@ -229,11 +229,6 @@ function openSettingsWebpage() {
 }
 
 function showView(name) {
-  if (name === 'settings') {
-    openSettingsWebpage();
-    return;
-  }
-
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.querySelectorAll('.top-nav-btn').forEach(b => b.classList.remove('active'));
   document.querySelectorAll('.nav-tab').forEach(b => b.classList.remove('active'));
@@ -241,11 +236,11 @@ function showView(name) {
   const viewEl = document.getElementById(`view-${name}`);
   if (viewEl) viewEl.classList.add('active');
 
-  const topNavId = { agent: 'topNavAgent', history: 'topNavHistory' }[name];
+  const topNavId = { agent: 'topNavAgent', history: 'topNavHistory', settings: 'topNavSettings' }[name];
   const topNavEl = $(topNavId);
   if (topNavEl) topNavEl.classList.add('active');
 
-  const navId = { agent: 'navAgent', history: 'navHistory' }[name];
+  const navId = { agent: 'navAgent', history: 'navHistory', settings: 'navSettings' }[name];
   const navEl = document.getElementById(navId);
   if (navEl) navEl.classList.add('active');
 
@@ -302,6 +297,7 @@ const navHistory  = $('navHistory');
 const navSettings = $('navSettings');
 const topNavAgent    = $('topNavAgent');
 const topNavHistory  = $('topNavHistory');
+const topNavSettings = $('topNavSettings');
 const modelPillBtn = $('modelPillBtn');
 
 if (navAgent)       navAgent.addEventListener('click',       () => showView('agent'));
@@ -309,6 +305,10 @@ if (navHistory)     navHistory.addEventListener('click',     () => showView('his
 if (navSettings)    navSettings.addEventListener('click',    () => openSettingsWebpage());
 if (topNavAgent)    topNavAgent.addEventListener('click',    () => showView('agent'));
 if (topNavHistory)  topNavHistory.addEventListener('click',  () => showView('history'));
+// Opens the IN-PANEL settings view (privacy test, SIH scorecard, live
+// inspector, skills editor). The toolbar "Settings ↗" button still opens the
+// full-page options tab — the ↗ affordance is the explicit signal for that.
+if (topNavSettings) topNavSettings.addEventListener('click', () => { showView('settings'); openSettingsPage('home'); });
 const toolbarSettingsBtn = $('toolbarSettingsBtn');
 if (toolbarSettingsBtn) toolbarSettingsBtn.addEventListener('click', () => openSettingsWebpage());
 const suggestSettingsBtn = $('suggestSettingsBtn');
@@ -627,7 +627,7 @@ const openSkillsBtn  = $('openSkillsBtn');
 const skillsBackBtn = $('skillsBackBtn');
 const settingsBackBtn = $('settingsBackBtn');
 if (openSkillsBtn)  openSkillsBtn.addEventListener('click',  () => showView('skills'));
-if (skillsBackBtn) skillsBackBtn.addEventListener('click', () => showView('settings'));
+if (skillsBackBtn) skillsBackBtn.addEventListener('click', () => { showView('settings'); openSettingsPage('home'); });
 if (settingsBackBtn) settingsBackBtn.addEventListener('click', () => openSettingsPage('home'));
 document.querySelectorAll('[data-settings-target]').forEach(btn => {
   btn.addEventListener('click', () => openSettingsPage(btn.dataset.settingsTarget || 'home'));
@@ -2156,13 +2156,13 @@ async function loadSettings() {
     }
     if (ollamaTextModelInput) ollamaTextModelInput.value = settings.ollamaTextModel || settings.model || '';
     if (ollamaVisionModelInput) ollamaVisionModelInput.value = settings.ollamaVisionModel || settings.model || '';
-    if (settings.maxSteps        && maxStepsInput)  maxStepsInput.value = settings.maxSteps;
-    if (settings.screenshotDelay && delayInput)     delayInput.value    = settings.screenshotDelay;
+    if (maxStepsInput) maxStepsInput.value = settings.maxSteps || DEFAULT_SETTINGS.maxSteps;
+    if (delayInput && settings.screenshotDelay) delayInput.value = settings.screenshotDelay;
     // generalized VLM speed controls
     const vlmSpeedProfileInput    = $('vlmSpeedProfileInput');
     const vlmReasoningEffortInput = $('vlmReasoningEffortInput');
     const vlmMaxTokensInput       = $('vlmMaxTokensInput');
-    if (vlmSpeedProfileInput)    vlmSpeedProfileInput.value    = settings.vlmSpeedProfile || 'balanced';
+    if (vlmSpeedProfileInput)    vlmSpeedProfileInput.value    = settings.vlmSpeedProfile || DEFAULT_SETTINGS.vlmSpeedProfile;
     if (vlmReasoningEffortInput) vlmReasoningEffortInput.value = settings.vlmReasoningEffort !== undefined ? settings.vlmReasoningEffort : 'low';
     if (vlmMaxTokensInput)       vlmMaxTokensInput.value       = settings.vlmMaxTokens || 0;
     if (settings.langSearchKey   && lsInput)        lsInput.value       = settings.langSearchKey;
@@ -2175,8 +2175,12 @@ async function loadSettings() {
     if (subAgentConcurrencyInput) subAgentConcurrencyInput.value = settings.subAgentConcurrency || 3;
     if (inlineDrMaxSitesInput) inlineDrMaxSitesInput.value = settings.deepResearchMaxSites || 6;
     if (inlineDrSearchEngineSelect) inlineDrSearchEngineSelect.value = settings.deepResearchSearchEngine || 'google';
-    if (exportFormatInput) exportFormatInput.value = settings.exportFormat || 'json';
-    if (exportFolderInput) exportFolderInput.value = settings.exportFolder || 'TechyMind Exports';
+    if (exportFormatInput) exportFormatInput.value = settings.exportFormat || DEFAULT_SETTINGS.exportFormat;
+    if (exportFolderInput) {
+      exportFolderInput.value = settings.exportFolder || DEFAULT_SETTINGS.exportFolder;
+      // Keep the placeholder honest without re-declaring the folder name in HTML.
+      exportFolderInput.placeholder = DEFAULT_SETTINGS.exportFolder;
+    }
     if (exportDiskLabelInput) exportDiskLabelInput.value = settings.exportDiskLabel || 'Default Downloads';
     if (exportPromptInput) exportPromptInput.checked = Boolean(settings.exportPrompt);
     if (autoExportScrapesInput) autoExportScrapesInput.checked = Boolean(settings.autoExportScrapes);
@@ -2312,9 +2316,10 @@ async function saveSettings() {
         : (currentProvider === 'custom' ? ($('customModelInput')?.value.trim() || '') : ($('modelInput')?.value.trim() || '')),
       ollamaTextModel: currentProvider === 'ollama' ? ($('ollamaTextModelInput')?.value.trim() || '') : '',
       ollamaVisionModel: currentProvider === 'ollama' ? ($('ollamaVisionModelInput')?.value.trim() || '') : '',
-      maxSteps:        maxStepsInput ? (parseInt(maxStepsInput.value) || 20) : 20,
+      // Defaults come from DEFAULT_SETTINGS — do not re-inline the literals here.
+      maxSteps:        maxStepsInput ? (parseInt(maxStepsInput.value) || DEFAULT_SETTINGS.maxSteps) : DEFAULT_SETTINGS.maxSteps,
       screenshotDelay: delayInput    ? (parseInt(delayInput.value)    || 1200): 1200,
-      vlmSpeedProfile:    $('vlmSpeedProfileInput') ? $('vlmSpeedProfileInput').value : 'balanced',
+      vlmSpeedProfile:    $('vlmSpeedProfileInput') ? $('vlmSpeedProfileInput').value : DEFAULT_SETTINGS.vlmSpeedProfile,
       vlmReasoningEffort: $('vlmReasoningEffortInput') ? $('vlmReasoningEffortInput').value : 'low',
       vlmMaxTokens:       $('vlmMaxTokensInput') ? (parseInt($('vlmMaxTokensInput').value, 10) || 0) : 0,
       langSearchKey:   $('langSearchKeyInput')  ? $('langSearchKeyInput').value.trim()  : '',
@@ -2328,8 +2333,8 @@ async function saveSettings() {
         : [],
       useSubAgents: $('useSubAgentsInput') ? $('useSubAgentsInput').checked : true,
       subAgentConcurrency: $('subAgentConcurrencyInput') ? (parseInt($('subAgentConcurrencyInput').value, 10) || 3) : 3,
-      exportFormat: $('exportFormatInput') ? $('exportFormatInput').value : 'json',
-      exportFolder: $('exportFolderInput') ? $('exportFolderInput').value.trim() : 'TechyMind Exports',
+      exportFormat: $('exportFormatInput') ? $('exportFormatInput').value : DEFAULT_SETTINGS.exportFormat,
+      exportFolder: $('exportFolderInput') ? ($('exportFolderInput').value.trim() || DEFAULT_SETTINGS.exportFolder) : DEFAULT_SETTINGS.exportFolder,
       exportDiskLabel: $('exportDiskLabelInput') ? $('exportDiskLabelInput').value.trim() : 'Default Downloads',
       exportPrompt: $('exportPromptInput') ? $('exportPromptInput').checked : false,
       autoExportScrapes: $('autoExportScrapesInput') ? $('autoExportScrapesInput').checked : false,
@@ -4154,6 +4159,7 @@ requestAgentStateHydration({ force: true });
   chrome.runtime.sendMessage = function patchedSendMessage(msg, ...rest) {
     if (msg && msg.type === 'START_AGENT' && privacyEnabled) {
       msg = {
+        ...msg,
         type: 'PRIVACY_START',
         task: msg.task,
         mode: msg.mode,

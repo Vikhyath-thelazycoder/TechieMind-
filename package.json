@@ -3,12 +3,18 @@
   "private": true,
   "type": "module",
   "description": "TechyMind — on-device visual perception and autonomous browser agent.",
-  "version": "1.15.1",
+  "version": "1.29.0",
   "scripts": {
     "bench": "node TechyMindBench/run-techymind-bench.mjs",
     "bench:unit": "node TechyMindBench/run-techymind-bench.mjs --unit",
+    "bench:e2e": "node TechyMindBench/run-techymind-bench.mjs --e2e",
+    "bench:adversarial": "node TechyMindBench/run-techymind-bench.mjs --adversarial",
+    "bench:browser": "node TechyMindBench/run-techymind-bench.mjs --browser",
     "bench:all": "node TechyMindBench/run-techymind-bench.mjs --all",
-    "build:firefox": "node scripts/build-firefox.mjs"
+    "build:firefox": "node scripts/build-firefox.mjs",
+    "server": "node server/server.js",
+    "server:dev": "node --watch server/server.js",
+    "doctor": "node scripts/doctor.mjs"
   },
   "devDependencies": {
     "playwright": "^1.63.0"

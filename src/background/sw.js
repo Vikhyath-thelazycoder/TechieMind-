@@ -4,6 +4,7 @@
 
 import { callAI, callAIRaw, getProviderCapabilities, isProviderConfigured }   from '../lib/providers.js';
 import { isSihMode, sihRawScreenshotDecision } from '../lib/sih-mode.js';
+import { finalPiiSweepText, maskSecretShapedText, scanTextForSecrets } from '../lib/privacy-firewall.js';
 import {
   deepResearch,
   buildDecompositionPrompt,
@@ -13,7 +14,7 @@ import {
 } from '../lib/deepsearch.js';
 import { getSettings, saveSettings as persistSettings, getHistory, appendHistory, clearHistory, initStorage, appendExport, recordTokenUsage, clearTokenUsage, serializeStorageWrite, STATE_VERSION } from '../lib/storage.js';
 import { sleep, getHostFromUrl, normalizeHost, parseJSON } from '../lib/utils.js';
-import { MSG, STATUS, STEP_TYPE, PROTECTED_ACTION_LABELS, MODEL_PRICING } from '../lib/constants.js';
+import { MSG, STATUS, STEP_TYPE, PROTECTED_ACTION_LABELS, MODEL_PRICING, DEFAULT_SETTINGS } from '../lib/constants.js';
 import { buildSearchUrl, openResearchTab, scrapeSearchResults, scrapeReadablePage, closeTabs } from '../lib/browser-research.js';
 import { downloadExportFile } from '../lib/export.js';
 // TASK AUTHORIZATION DAEMON — purchase/deletion actions need the
@@ -44,7 +45,6 @@ import { ensureOffscreen, sendToOffscreen, warmupVisionModels } from '../lib/off
 import { detectSkillsForTask } from '../lib/skill-matcher.js';
 import { getAllSkills } from '../lib/skills.js';
 import { loadLibrarySkills } from '../lib/skill-library.js';
-import { parseOrdinalPhrase } from '../lib/ordinal-resolver.js';
 import { inferStartUrlFromTask, detectCrossDomainSwitch, PRIVILEGED_URL_RE as PRIVILEGED_URL_RE_SW } from '../lib/domain-router.js';
 import { createLogger, installGlobalErrorTraps } from '../core/logger.js';
 
@@ -253,6 +253,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
     'PRIVACY_CONFIGURE':     () => { configurePrivacy(msg.settings || {}); respond({ ok: true, settings: getPrivacySettings() }); },
     'PRIVACY_CAPTURE':       () => handlePrivacyCapture(msg, respond),
     'PRIVACY_GET_STATS':     () => respond({ last: getLastPrivacyRun(), cumulative: getCumulativePrivacyStats(), settings: getPrivacySettings() }),
+    // Human-handover resume/stop. The side panel's handover card has always
+    // sent these two, but neither was routed, so "Resume Agent" silently did
+    // nothing and the loop stayed docked forever.
+    'RESUME_AFTER_HANDOVER': () => {
+      agentState.handoverResume = true;
+      agentState.handoverStop = false;
+      respond({ ok: true });
+    },
+    'STOP_TASK':             () => {
+      agentState.handoverStop = true;
+      agentState.stopRequested = true;
+      agentState.running = false;
+      respond({ ok: true });
+    },
     'LOCAL_MODEL_LIST':      () => handleLocalModelList(respond),
     'LOCAL_MODEL_DOWNLOAD':  () => handleLocalModelDownload(msg, respond),
     'LOCAL_MODEL_DELETE':    () => deleteLocalModel(msg.modelId).then(r => respond({ ok: true, ...r })),
@@ -422,6 +436,42 @@ function isSummarizeIntent(task) {
   return /\b(summarize|summarise|summary|tldr)\b/i.test(t) && /\b(page|site|webpage|tab|article|screen)\b/i.test(t);
 }
 
+/**
+ * Fail-closed outbound gate for prompts that embed scraped page text.
+ *
+ * `callAIRaw` performs NO privacy checking of its own — it is a thin provider
+ * transport. The privacy loop compensates by routing every turn through
+ * `decideViaServer()`, which gates properly. The direct-call paths
+ * (SUMMARIZE_PAGE, SCRAPE_PAGE, AUTO_SCRAPE, the conversational short-circuit,
+ * history compaction) had no such compensation and were shipping raw
+ * `readableText` — emails, card numbers, Aadhaar/PAN, auth tokens — straight to
+ * a cloud provider.
+ *
+ * This is the single choke point those paths now share:
+ *   1. PII sweep        — typed identifiers become [REDACTED:<type>]
+ *   2. secret masking   — key/token/password shapes are masked
+ *   3. verification     — if anything secret-shaped SURVIVED, refuse to send
+ *
+ * Fail-closed: on refusal the caller gets a blocked answer rather than a leak.
+ */
+function sweepOutboundPrompt(prompt, label = 'prompt') {
+  const swept = maskSecretShapedText(finalPiiSweepText(String(prompt ?? '')));
+  const residual = scanTextForSecrets(swept);
+  // scanTextForSecrets returns an ARRAY of matched pattern ids — [] when clean.
+  // `if (residual)` would be truthy for [] and block every request, so test the
+  // length.
+  if (Array.isArray(residual) ? residual.length > 0 : Boolean(residual)) {
+    console.error(`[TechyMind][FIREWALL] blocked outbound ${label}: ${Array.isArray(residual) ? residual.join('; ') : residual}`);
+    return { ok: false, blocked: residual, text: '' };
+  }
+  return { ok: true, blocked: null, text: swept };
+}
+
+/** The standard blocked-answer used whenever the outbound sweep refuses. */
+function outboundBlockedAnswer(label) {
+  return `Privacy firewall blocked this ${label}: sensitive text survived redaction, so nothing was sent to the model.`;
+}
+
 function isConversationalTask(task) {
   const t = String(task || '').trim().toLowerCase();
   if (!t) return false;
@@ -487,12 +537,21 @@ Answer the user concisely, accurately, and naturally. If the user asks for the d
 
     const fullPrompt = `${systemPrompt}\n\nUser: ${msg.task}\nAssistant:`;
 
+    // No page content here, but the user may have pasted a credential, and this
+    // path has no firewall of its own. Sweep it like every other outbound.
+    const gate = sweepOutboundPrompt(fullPrompt, 'conversational request');
+    const gatedPrompt = gate.ok ? gate.text : '';
+
     let cleanAnswer = '';
     try {
-      const raw = await callAIRaw(settings, fullPrompt, { onUsage: trackUsage });
-      cleanAnswer = typeof raw === 'string' ? raw.trim() : JSON.stringify(raw);
+      if (gate.ok) {
+        const raw = await callAIRaw(settings, gatedPrompt, { onUsage: trackUsage });
+        cleanAnswer = typeof raw === 'string' ? raw.trim() : JSON.stringify(raw);
+      } else {
+        cleanAnswer = outboundBlockedAnswer('conversational request');
+      }
     } catch (aiErr) {
-      const res = await callAI(settings, fullPrompt, null, { maxTokens: 400 });
+      const res = await callAI(settings, gatedPrompt, null, { maxTokens: 400 });
       cleanAnswer = typeof res === 'string' ? res : (res.thought || res.message || res.text || JSON.stringify(res));
     }
 
@@ -628,7 +687,7 @@ async function handleStartInner(msg, respond) {
     task:                 msg.task,
     taskProfile:          inferTaskProfile(msg.taskProfile, msg.skills),
     settings,
-    maxIterations:        settings.maxSteps || 25,
+    maxIterations:        settings.maxSteps || DEFAULT_SETTINGS.maxSteps,
     startUrl:             workingUrl,
     startTitle:           activeTab.title,
     attachments:          cloneAttachments(msg.attachments || []),
@@ -975,11 +1034,21 @@ async function executionPhase() {
   // task started — a mid-run mutation of agentState.task cannot authorize a
   // purchase/deletion after the fact. (Mid-run USER NOTES stay live — the
   // user may authorize explicitly while the task runs.)
-  agentState.guardianTaskSnapshot = String(agentState.task || '');
-  agentState.guardianHits = 0;
-  // DAEMON COUNTER: per-run accounting of every gate decision —
-  // flushed to the lifetime accumulator exactly once when the run ends.
-  agentState.guardianCounter = createGuardianCounter();
+  //
+  // SEED-ONCE: executionPhase() is also re-entered to RESUME a run after the
+  // user answers an approval card (handleApprovePlan / handleResolveApproval).
+  // Unconditionally resetting the 3-hit block counter here meant every approval
+  // click wiped the purchase/delete tally, so a task could be blocked twice in
+  // a row and still run to completion. Only seed a fresh counter when this run
+  // has not been seeded yet.
+  if (!agentState._guardianSeededFor || agentState._guardianSeededFor !== agentState.sessionId) {
+    agentState._guardianSeededFor = agentState.sessionId;
+    agentState.guardianTaskSnapshot = String(agentState.task || '');
+    agentState.guardianHits = 0;
+    // DAEMON COUNTER: per-run accounting of every gate decision —
+    // flushed to the lifetime accumulator exactly once when the run ends.
+    agentState.guardianCounter = createGuardianCounter();
+  }
 
   while (agentState.running && !agentState.stopRequested) {
     if (agentState.paused) return;
@@ -1089,10 +1158,18 @@ async function executionPhase() {
           .slice(-6)
           .filter(s => s.type === STEP_TYPE.ACTION)
           .map(s => s.text || '')
-          .filter(t => t.includes(sel) && (t.startsWith('? Type') || t.startsWith('? Fill')));
+          // Match the ACTION step by structure, not by an emoji prefix. The
+          // rendered text is `${describeAction(action)}` (see pushStep below),
+          // so the reliable signals are the verb and the selector — the old
+          // check keyed on a literal '? Type' / '? Fill' whose leading glyph
+          // had already been mangled to '?' in source, which meant any future
+          // edit to the prefix would silently disable this anti-loop guard.
+          .filter(t => t.includes(sel) && /^(Type|Fill)\b/.test(t.replace(/^\W*\s*/, '')));
         if (recentTypes.length >= 2) {
           pushStep(STEP_TYPE.MUTED, `?? Skipping repeated type into ${sel} — field already filled. Moving on.`);
-          agentState.iterationCount++; // still counts as a step
+          // iterationCount was already incremented at the top of this loop body;
+          // incrementing again here would burn two steps out of maxIterations
+          // for a single skipped action.
           continue;
         }
       }
@@ -1129,6 +1206,11 @@ async function executionPhase() {
         read_later_list: m => m.ok && `Reading list (${m.count}): ${(m.items || []).slice(0, 4).map(i => i.title).join(' | ')}`,
         monitor_start: m => m.ok && `Monitor registered: ${m.monitor?.url} every ${m.monitor?.intervalMin} min for ${m.monitor?.checkText}`,
         use_skill: m => m.ok && (m.alreadyActive ? `Skill "${m.skill}" already active` : `Skill "${m.skill}" engaged — follow its instructions from the next step`),
+        // Surface the harvest as an observation so the model can actually use
+        // what it extracted on the following turn.
+        extract: m => m.ok
+          ? `Extracted ${m.chars} chars${m.truncated ? ' (truncated)' : ''}: ${String(m.data || '').slice(0, 600).replace(/\s+/g, ' ')}`
+          : `Extract found nothing (${m.reason || 'no match'})`,
       };
       const observation = nativeMeta[action.type]?.(meta);
       if (observation) pushStep(STEP_TYPE.MUTED, `▸ ${observation}`);
@@ -1787,7 +1869,11 @@ async function runVerifierRole(action) {
 }
 
 async function runSynthesizerRole(settings, prompt) {
-  return await callAIRaw(settings, prompt, { onUsage: trackUsage });
+  // The synthesis prompt is assembled from research findings, which are derived
+  // from page text. Sweep before it leaves.
+  const gate = sweepOutboundPrompt(prompt, 'research synthesis request');
+  if (!gate.ok) return outboundBlockedAnswer('research synthesis request');
+  return await callAIRaw(settings, gate.text, { onUsage: trackUsage });
 }
 
 async function runNavigatorRole(pageInfo, screenshot) {
@@ -1877,8 +1963,17 @@ async function compactWorkHistory() {
 
   const compressionPrompt = buildHistoryCompactionPrompt(agentState, completedSteps);
 
+  // Step text is page-derived, so compaction output can carry page text forward
+  // into a later, differently-gated request. Sweep before it leaves.
+  const gate = sweepOutboundPrompt(compressionPrompt, 'history compaction request');
+  if (!gate.ok) {
+    logLimits.warn('compaction blocked by firewall:', gate.blocked);
+    agentState.taskMemory.compaction = { lastCompactedStepCount: allCompletedSteps.length, lastCompactedIteration: agentState.iterationCount };
+    return;
+  }
+
   try {
-    const summary = await callAIRaw(agentState.settings, compressionPrompt, { onUsage: trackUsage });
+    const summary = await callAIRaw(agentState.settings, gate.text, { onUsage: trackUsage });
     if (summary && String(summary).trim().length > 20) {
       agentState.taskMemory.workSummary = String(summary).trim().substring(0, 800);
       agentState.taskMemory.compaction = {
@@ -1951,9 +2046,18 @@ function summarizeScrapedPage(page = {}) {
 
 async function analyzeResearchSource(settings, task, source, index, onProgress = () => {}) {
   onProgress(`Source analyst ${index}: reading ${source.url}`);
+  // `source.page` is raw scraped content — sweep it like every other outbound.
+  const gate = sweepOutboundPrompt(
+    buildBrowserSourceAnalysisPrompt(task, source, source.page, index - 1, 0),
+    'research source analysis request'
+  );
+  if (!gate.ok) {
+    console.warn(`[TechyMind] research source ${index} blocked by firewall:`, gate.blocked);
+    return { ok: false, error: outboundBlockedAnswer('research source analysis request') };
+  }
   const analysis = parseJSON(await callAIRaw(
     settings,
-    buildBrowserSourceAnalysisPrompt(task, source, source.page, index - 1, 0),
+    gate.text,
     { onUsage: trackUsage }
   ));
   const facts = Array.isArray(analysis?.facts) ? analysis.facts.slice(0, 6) : [];
@@ -2025,8 +2129,13 @@ function buildSummarizePrompt(task, page, profileData = {}) {
 }
 
 async function analyzeScrapeWithSubAgents(settings, task, page) {
-  const rawResponse = await callAIRaw(settings, buildScrapeExtractionPrompt(task, page), { onUsage: trackUsage });
-  
+  // FIREWALL: the scrape extraction prompt embeds raw page text, so it is swept
+  // before it can reach a provider. See sweepOutboundPrompt().
+  const gate = sweepOutboundPrompt(buildScrapeExtractionPrompt(task, page), 'scrape extraction request');
+  if (!gate.ok) throw new Error(outboundBlockedAnswer('scrape extraction request'));
+
+  const rawResponse = await callAIRaw(settings, gate.text, { onUsage: trackUsage });
+
   let jsonString = rawResponse;
   const blocksMatch = rawResponse.match(/<blocks>([\s\S]*?)<\/blocks>/i);
   if (blocksMatch && blocksMatch[1]) {
@@ -2089,7 +2198,7 @@ async function exportDataPayload(payload, options = {}) {
     dataset: payload,
     formats,
     baseName: options.baseName,
-    folder: settings.exportFolder || 'TechyMind Exports',
+    folder: settings.exportFolder,
     diskLabel: settings.exportDiskLabel || 'Default Downloads',
     prompt: Boolean(settings.exportPrompt),
   });
@@ -2556,7 +2665,7 @@ async function handleSummarizePage(msg, respond) {
       role: AGENT_ROLE.EXTRACTOR,
       taskProfile: 'summarize',
     });
-    const prompt = `Extractor role: summarize the current page.
+    const rawPrompt = `Extractor role: summarize the current page.
 
 URL: ${extractPage.url}
 Title: ${extractPage.title}
@@ -2570,7 +2679,24 @@ Instructions:
 - Start with a 2-3 sentence overview.
 - Then list 4-6 bullet key points.
 - Use only the provided content.`;
-    const summary = await callAIRaw(settings, prompt, { onUsage: trackUsage });
+
+    // FIREWALL: this path bypasses decideViaServer() entirely, so the scraped
+    // page text is swept here. Previously the raw 12 000 chars below went to
+    // the provider unredacted.
+    const gate = sweepOutboundPrompt(rawPrompt, 'summarize request');
+    if (!gate.ok) {
+      const note = outboundBlockedAnswer('summarize request');
+      pushStep(STEP_TYPE.ERROR, note);
+      broadcastMessage({ type: MSG.SUMMARIZE_ERROR, error: note });
+      await appendHistory({
+        id: 'sum_' + Date.now(),
+        task: msg.task || `Summarize: ${page.title || 'Page'}`,
+        status: 'error', result: note, steps: 0, tokens: 0, cost: 0, time: Date.now(),
+      });
+      return;
+    }
+
+    const summary = await callAIRaw(settings, gate.text, { onUsage: trackUsage });
     await appendHistory({
       id: 'sum_' + Date.now(),
       task: msg.task || `Summarize: ${page.title || 'Page'}`,
@@ -2983,6 +3109,10 @@ async function handlePrivacyStartInner(msg, respond) {
     redactTextPii: privacyCfg.redactTextPii !== false,
     runYolo: Boolean(privacyCfg.runYolo),
     useNer: Boolean(privacyCfg.useNer),
+    // Previously omitted, so the panel's OCR-PII toggle only ever survived by
+    // accident (configurePrivacy merges, and PRIVACY_CONFIGURE runs at panel
+    // init). Forward it explicitly.
+    ocrPii: Boolean(privacyCfg.ocrPii),
     serverUrl: privacyCfg.serverUrl || 'http://127.0.0.1:8787',
   });
 
@@ -3079,13 +3209,19 @@ async function handlePrivacyStartInner(msg, respond) {
     mode: 'privacy',
     task: msg.task,
     settings,
-    maxIterations: settings.maxSteps || 25,
+    maxIterations: settings.maxSteps || DEFAULT_SETTINGS.maxSteps,
     startUrl: activeTab.url,
     startTitle: activeTab.title,
     agentGroupId: oldGroupId,
     taskTabIds: oldTabIds,
     steps: oldSteps,
     history: oldHistory,
+    // The panel's privacy interceptor forwards the whole START_AGENT envelope,
+    // so skills + attachments survive the START_AGENT -> PRIVACY_START rewrite.
+    // Carry them into the run state instead of silently dropping them.
+    skills: Array.isArray(msg.skills) ? msg.skills : (isContinuing ? agentState.skills : []),
+    attachments: Array.isArray(msg.attachments) ? msg.attachments
+      : (msg.attachment ? [msg.attachment] : (isContinuing ? agentState.attachments : [])),
     conversationHistory: [...prevConvo, { role: 'user', text: msg.task, time: Date.now() }],
   });
 
@@ -3139,6 +3275,15 @@ async function handlePrivacyStartInner(msg, respond) {
     // ASK-BEFORE-ACTING: per-action approval gate (no-op in 'auto').
     askBeforeActing: agentState.askBeforeActing,
     approvalGate: agentState.askBeforeActing ? requestActionApproval : null,
+    // Tell the side panel the agent has docked on a CAPTCHA/OTP so the handover
+    // card renders and offers a working Resume / Stop pair.
+    onHandover: (info) => {
+      broadcastMessage({
+        type: 'TECHYMIND_HANDOVER_REQUIRED',
+        handover: info,
+        sessionId: agentState.sessionId,
+      });
+    },
     onStep: (type, text, payload = {}) => {
       // pushStep alone is responsible for broadcasting — the previous
       // second raw broadcast below re-sent every step in a DIFFERENT shape

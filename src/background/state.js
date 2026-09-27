@@ -7,6 +7,10 @@ export function createEmptyAgentState(overrides = {}) {
     running:       false,
     paused:        false,
     stopRequested: false,
+    // Human-handover (CAPTCHA / OTP) dock signals. Set by the SW's
+    // RESUME_AFTER_HANDOVER and STOP_TASK routes; polled by the privacy loop.
+    handoverResume: false,
+    handoverStop: false,
     finalStatus:   'idle',
     finalReport:   '',
     finalData:     {},
