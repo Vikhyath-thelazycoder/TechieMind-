@@ -21,10 +21,12 @@ export const DEFAULT_SETTINGS = {
   providerSupportsVision: false,
   ollamaTextModel:     'gemma3:12b',
   ollamaVisionModel:   '',
+  mlxFastPathEnabled:  true,
+  mlxBaseUrl:          'http://127.0.0.1:8181',
   maxSteps:            25,
   screenshotDelay:     1200,
   // GENERALIZED VLM speed controls (work with ANY provider):
-  vlmSpeedProfile:     'balanced', // fast | balanced | quality (see speed-profile.js)
+  vlmSpeedProfile:     'fast',     // fast | balanced | quality (see speed-profile.js)
   vlmReasoningEffort:  'low',      // low | medium | high | '' (send nothing)
   vlmMaxTokens:        0,          // decision-turn output cap; 0 = follow profile
   permissionMode:      'ask',
@@ -40,6 +42,7 @@ export const DEFAULT_SETTINGS = {
   deepResearchPreferredHosts: [],
   useSubAgents:        true,
   subAgentConcurrency: 3,
+  enableTabGrouping:   false,
   exportFormat:        'json',
   exportFolder:        'TechyMind',
   exportPrompt:        false,
@@ -51,6 +54,10 @@ export const DEFAULT_SETTINGS = {
     email:    '',
     phone:    '',
     address:  '',
+    city:     '',
+    state:    '',
+    pincode:  '',
+    country:  'India',
     company:  '',
     website:  '',
     notes:    '',

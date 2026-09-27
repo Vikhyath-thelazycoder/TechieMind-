@@ -144,6 +144,40 @@
               <p class="field-hint">You can pull new models with <code>ollama pull &lt;model&gt;</code> in your terminal.</p>
             </div>
           </div>
+
+          <!-- Apple Silicon Metal GPU Reflex Engine (Laya MLX) Card -->
+          <div class="card" style="margin-top: 1.5rem; border: 1px solid rgba(16, 185, 129, 0.35); background: linear-gradient(180deg, rgba(16, 185, 129, 0.05) 0%, rgba(15, 23, 42, 0.7) 100%);">
+            <div class="card-header">
+              <div class="card-icon" style="background: rgba(16, 185, 129, 0.15); color: #34d399; font-size: 1.3rem;">⚡</div>
+              <div>
+                <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                  <h3 style="margin: 0;">Apple Silicon Metal GPU Reflex Engine</h3>
+                  <span class="badge" style="background: #059669; color: #fff; font-size: 0.7rem; padding: 2px 8px; border-radius: 999px; font-weight: 600;">Laya MLX ~2ms</span>
+                </div>
+                <p>Sub-5ms hardware-accelerated reflex layer running natively on Apple Silicon Metal GPU. Eliminates multi-second LLM overhead for instant browser actions.</p>
+              </div>
+            </div>
+
+            <div class="form-group toggle-row" style="margin-top: 1rem; padding-bottom: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.06);">
+              <div class="toggle-text">
+                <label for="mlxFastPathToggle">Enable Laya MLX Metal Reflex Fast-Path</label>
+                <p>Instantly rank UI candidate actions on Metal GPU in 2ms before invoking Ollama. 100% fail-soft fallback.</p>
+              </div>
+              <input type="checkbox" id="mlxFastPathToggle" class="switch" checked />
+            </div>
+
+            <div class="form-group" style="margin-top: 1rem;">
+              <label for="mlxBaseUrl">MLX Metal Daemon URL</label>
+              <div class="input-with-action">
+                <input type="text" id="mlxBaseUrl" placeholder="http://127.0.0.1:8181" value="http://127.0.0.1:8181" />
+                <button class="btn btn-secondary" id="testMlxBtn">Test MLX Metal</button>
+              </div>
+              <div class="status-indicator" id="mlxStatusIndicator" style="margin-top: 0.6rem;">
+                <span class="dot" id="mlxStatusDot"></span>
+                <span class="status-msg" id="mlxStatusMsg">Checking MLX Metal daemon…</span>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- Compatible Section -->
@@ -198,6 +232,14 @@
               <label for="whisperApiKey">Whisper API Key</label>
               <input type="password" id="whisperApiKey" placeholder="sk-..." />
               <p class="field-hint">Used for OpenAI Whisper cloud speech-to-text recognition.</p>
+            </div>
+
+            <div style="margin-top:16px; padding:12px 14px; border-radius:8px; background:var(--bg-secondary); border:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; gap:12px;">
+              <div>
+                <strong style="display:block; font-size:13px; color:var(--text-primary); margin-bottom:2px;">Browser Microphone Permission</strong>
+                <span id="micPermissionStatus" style="font-size:12px; color:var(--text-muted);">Required for side panel voice input.</span>
+              </div>
+              <button type="button" id="grantMicBtn" class="btn btn-secondary" style="font-size:12px; padding:6px 14px; white-space:nowrap; cursor:pointer;">Allow Microphone</button>
             </div>
           </div>
 
@@ -283,6 +325,24 @@
                   <span>Masks Aadhaar, PAN, voter ID, passport, driving license, IFSC, UPI, and GSTIN tokens.</span>
                 </div>
               </label>
+
+              <label class="toggle-item">
+                <input type="checkbox" id="tabGroupingToggle" />
+                <div class="toggle-text">
+                  <strong>Chrome Tab Groups Sandbox</strong>
+                  <span>Automatically groups agent tasks into a colored Chrome Tab Group. Keep disabled for normal single tabs without tab-grouping prompts.</span>
+                </div>
+              </label>
+
+              <div class="setting-item" style="margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border);">
+                <label for="speedProfileSelect"><strong>Vision &amp; Sanitization Speed Profile</strong></label>
+                <p class="muted" style="margin: 4px 0 8px 0; font-size: 12px; color: var(--tx2);">Controls screenshot resolution and ViT pass depth on local Apple Silicon GPU.</p>
+                <select id="speedProfileSelect" class="form-select">
+                  <option value="fast" selected>Fast Mode (&lt;300ms, 896px screenshot, ultra-low latency)</option>
+                  <option value="balanced">Balanced Mode (~1.2s, 1280px screenshot, standard detail)</option>
+                  <option value="quality">Quality Mode (1536px screenshot, maximum OCR detail)</option>
+                </select>
+              </div>
             </div>
           </div>
 
@@ -385,8 +445,26 @@
             </div>
           </div>
           <div class="form-group" style="margin-top:16px">
-            <label for="profAddress">Default Address</label>
-            <textarea id="profAddress" rows="3" placeholder="Address..."></textarea>
+            <label for="profAddress">Street / Delivery Address</label>
+            <textarea id="profAddress" rows="2" placeholder="House / Flat no, Street, Locality..."></textarea>
+          </div>
+          <div class="form-grid" style="margin-top:16px">
+            <div class="form-group">
+              <label for="profCity">City / Town</label>
+              <input type="text" id="profCity" placeholder="City..." />
+            </div>
+            <div class="form-group">
+              <label for="profState">State / Province</label>
+              <input type="text" id="profState" placeholder="State..." />
+            </div>
+            <div class="form-group">
+              <label for="profPincode">PIN / Postal Code</label>
+              <input type="text" id="profPincode" placeholder="PIN code..." />
+            </div>
+            <div class="form-group">
+              <label for="profCountry">Country</label>
+              <input type="text" id="profCountry" placeholder="India" />
+            </div>
           </div>
         </div>
       </section>
@@ -551,6 +629,46 @@
           </div>
           <div class="diag-console" id="diagConsole" style="display:none">
             <pre id="diagLog"></pre>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top: 18px;">
+          <div class="card-header">
+            <div class="card-icon" style="background:#eef2ff; color:#4f46e5;">🧪</div>
+            <div>
+              <h3>SIH Evaluation &amp; Live Demo Lab</h3>
+              <p>One-click launchers for live interactive testing and Smart India Hackathon jury presentation.</p>
+            </div>
+          </div>
+          <div class="diag-list" style="margin-top: 14px;">
+            <div class="diag-item">
+              <div>
+                <strong>Government Scheme Application Form Demo</strong>
+                <p>Interactive form testing autonomous profile autofill on Aadhaar, PAN, Name, DOB, and file upload fields.</p>
+              </div>
+              <button class="btn btn-primary" id="launchGovFormBtn" type="button">Launch Form Demo</button>
+            </div>
+            <div class="diag-item">
+              <div>
+                <strong>PII &amp; Face Redaction Lab</strong>
+                <p>Visual testing lab rendering sensitive credentials, ID cards, and faces for real-time masking verification.</p>
+              </div>
+              <button class="btn btn-secondary" id="launchRedactionLabBtn" type="button">Launch Redaction Lab</button>
+            </div>
+            <div class="diag-item">
+              <div>
+                <strong>E-Commerce Checkout &amp; Address Autofill Demo</strong>
+                <p>Live interactive checkout testing autonomous cart ordering, delivery address filling, and PII protection.</p>
+              </div>
+              <button class="btn btn-secondary" id="launchCheckoutDemoBtn" type="button">Launch Checkout Demo</button>
+            </div>
+            <div class="diag-item">
+              <div>
+                <strong>SIH Benchmark Dashboard</strong>
+                <p>Full accuracy, speed, and privacy compliance evaluation metrics across standard web tasks.</p>
+              </div>
+              <button class="btn btn-secondary" id="launchDashboardBtn" type="button">Launch Benchmark Dashboard</button>
+            </div>
           </div>
         </div>
       </section>

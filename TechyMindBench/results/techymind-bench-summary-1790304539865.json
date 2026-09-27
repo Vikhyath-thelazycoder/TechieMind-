@@ -1,0 +1,19 @@
+{
+  "meta": {
+    "type": "techymind-bench-summary",
+    "generatedAt": "2026-09-25T02:48:59.865Z",
+    "tiers": [
+      "unit"
+    ],
+    "note": "Orchestrator republish — every verdict and report path comes verbatim from the per-tier harness output; nothing is recomputed or asserted here."
+  },
+  "results": [
+    {
+      "tier": "unit",
+      "status": "PASS",
+      "report": "/Users/vikhyathmgowda007/Developer/ssssss/OpenCometAI/TechyMindBench/results/unit-1790304539864.json",
+      "durationMs": 56
+    }
+  ],
+  "allRanTiersPassed": true
+}

@@ -20,5 +20,5 @@
 import(chrome.runtime.getURL('src/background/sw.js')).catch((err) => {
   // Last-ditch visibility: surface boot failures in the background console
   // (about:debugging → Inspect) instead of failing silently.
-  console.error('[Open Comet Firefox] background boot failed:', err);
+  console.error('[TechyMind Firefox] background boot failed:', err);
 });

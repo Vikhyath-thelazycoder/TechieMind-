@@ -63,6 +63,7 @@ export async function ensureTaskGroup(agentState, tabIds, title) {
   // taskTabIds — they are NOT agent runs; grouping must stay a safe no-op.
   const isAgentState = agentState && Array.isArray(agentState.taskTabIds);
   if (!isAgentState || !ids.length) return agentState?.agentGroupId ?? null;
+  if (agentState?.settings?.enableTabGrouping === false) return null;
 
   const style = async (groupId) => {
     try {
@@ -84,7 +85,7 @@ export async function ensureTaskGroup(agentState, tabIds, title) {
     } catch (err) {
       // Stale group id (Chrome restart, user dissolved the group, …) → fall
       // through and create a fresh group below.
-      console.warn('[Open Comet] Sandbox: reusing the task group failed, creating a fresh one —', err?.message || err);
+      console.warn('[TechyMind] Sandbox: reusing the task group failed, creating a fresh one —', err?.message || err);
     }
   }
 
@@ -97,7 +98,7 @@ export async function ensureTaskGroup(agentState, tabIds, title) {
   } catch (err) {
     // Known cause: pinned tabs cannot join groups. The agent stays bounded by
     // taskTabIds enforcement either way — say so once, honestly.
-    console.warn('[Open Comet] Sandbox: could not place task tab(s) in a group (agent stays bounded to its tracked tabs) —', err?.message || err);
+    console.warn('[TechyMind] Sandbox: could not place task tab(s) in a group (agent stays bounded to its tracked tabs) —', err?.message || err);
     return null;
   }
 }

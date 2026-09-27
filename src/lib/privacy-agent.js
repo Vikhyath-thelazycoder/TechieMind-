@@ -15,7 +15,7 @@
 // The agent loop then either uploads the sanitized payload to the companion
 // server (server/server.js) or runs the decision fully on-device.
 
-import { callLocalAI, resolveLocalModel } from './local-llm.js';
+import { callLocalAI, resolveLocalModel, probeLayaMlxFastPath } from './local-llm.js';
 import { ensureOffscreen, sendToOffscreen } from './offscreen-client.js';
 import { callAI, getProviderCapabilities, isProviderConfigured } from './providers.js';
 import { compactHistory, extractFailedTargets } from './agent-context.js';
@@ -176,21 +176,19 @@ async function captureVisibleTabSafe(preferredTabId, sandboxTabIds = null) {
     if (PRIVILEGED_URL_RE.test(tab.url || '')) {
       throw new Error('Privacy capture cannot screenshot browser-internal pages (chrome://, Web Store, about:blank). Open a normal https:// page and try again.');
     }
-    // cross-origin navigation mid-run revokes the activeTab grant when
-    // Chrome's per-extension "Site access" is restricted (chrome://extensions
-    // → Details → Site access ≠ "On all sites"). The extension HAS <all_urls>
-    // declared, so fall back to the debugger capture path (chrome.debugger is
-    // unaffected by the activeTab grant window). This rescued run #1 in the
-    // field, which died at step 2 right after youtube.com → music.youtube.com.
+    // Fallback: attempt capturing via DevTools debugger protocol (Page.captureScreenshot)
+    // which operates directly via Blink/Skia compositing, bypassing macOS window occlusion,
+    // activeTab grant limits, and image readback failures.
+    try {
+      const dataUrl = await captureViaDebugger(tab);
+      console.warn(`[Privacy] captureVisibleTab failed (${msg}) — captured via chrome.debugger instead.`);
+      return { tab, dataUrl, viaDebugger: true };
+    } catch (e2) {
+      console.warn('[Privacy] debugger capture fallback also failed:', e2?.message || e2);
+    }
+
     if (/activeTab/i.test(msg)) {
-      try {
-        const dataUrl = await captureViaDebugger(tab);
-        console.warn('[Privacy] captureVisibleTab denied (site-access restriction) — captured via chrome.debugger instead. Fix permanently: chrome://extensions → OpenComet SIH → Details → Site access → "On all sites".');
-        return { tab, dataUrl, viaDebugger: true };
-      } catch (e2) {
-        console.warn('[Privacy] debugger capture fallback also failed:', e2?.message || e2);
-      }
-      throw new Error(`Screen capture failed: ${msg}. Fix: chrome://extensions → OpenComet SIH → Details → Site access → "On all sites", then retry.`);
+      throw new Error(`Screen capture failed: ${msg}. Fix: chrome://extensions → TechyMind → Details → Site access → "On all sites", then retry.`);
     }
     throw new Error(`Screen capture failed: ${msg}. If the window is minimized, restore it and retry.`);
   }
@@ -257,7 +255,7 @@ async function normalizeShotForVlm(dataUrl, maxWidth = 1280, quality = 0.85) {
 // screenshots were reused while the VLM hunted inputs that didn't exist yet.
 function pageMediaProbe() {
   const agentOwned = el => {
-    try { return !!(el && el.closest && el.closest('#open-comet-agent-overlay,#open-comet-redaction-viz,[id^="open-comet-"]')); }
+    try { return !!(el && el.closest && el.closest('#techymind-agent-overlay, #open-comet-agent-overlay, #techymind-redaction-viz, #open-comet-redaction-viz, [id^="techymind-"], [id^="open-comet-"]')); }
     catch { return false; }
   };
   const vis = el => {
@@ -415,7 +413,7 @@ export async function captureAndSanitize(tabId, overrides = {}, sandbox = null) 
       args: [],
     }).catch(() => [{ result: null }]),
   ]);
-  const { sensitive = [], text = '', census = {}, photoCandidates = [], pixelTextRects = [], visualSig = '' } = scanRes?.[0]?.result || {};
+  const { sensitive = [], text = '', census = {}, photoCandidates = [], pixelTextRects = [], visualSig = '', interactive = [] } = scanRes?.[0]?.result || {};
   const probe = dprInfo?.[0]?.result || { dpr: 1, w: 1280, h: 720, scrollY: 0, url: '', title: '', videos: [], audios: 0 };
   const { dpr, w, h, url: pageUrl, title: pageTitle, videos: pageVideos, audios: pageAudios } = probe;
 
@@ -527,6 +525,7 @@ export async function captureAndSanitize(tabId, overrides = {}, sandbox = null) 
     originalSize: imageDataUrl.length,
     usedTabId: targetTabId,
     sandboxRefocused: Boolean(capRefocused),
+    interactiveCandidates: interactive,
   };
 
   // : wrap the pipeline output in the CENTRAL PRIVACY FIREWALL envelope.
@@ -778,7 +777,7 @@ export async function decideViaServer(payload, task, history = [], providerSetti
     console.error('[Privacy] NETWORK GATE BLOCKED — secret-shaped text could not be masked safely:', wire.residualFields);
     return privacyBlockedDecision([`secret-shaped text survived the redact-and-verify sweep in: ${wire.residualFields.join(', ')}`]);
   }
-  if (wire.note) console.log(`[Open Comet] ${wire.note}`);
+  if (wire.note) console.log(`[TechyMind] ${wire.note}`);
 
   // the resolved speed profile drives the prompt caps below.
   const caps = getProviderCapabilities(settings);
@@ -838,6 +837,48 @@ export async function decideViaServer(payload, task, history = [], providerSetti
   );
   if (wireBlockDirect) return wireBlockDirect;
 
+  // 1b) Laya MLX System 1 Reflex Layer (Apple Silicon Metal GPU ~2ms)
+  // When running local or Ollama models on Apple Silicon, probe the non-autoregressive
+  // reflex layer first for candidate micro-actions before spending 20s on Ollama.
+  if (settings.mlxFastPath !== false && settings.mlxFastPathEnabled !== false && (settings.provider === 'ollama' || settings.provider === 'local')) {
+    try {
+      const rawCandidates = (Array.isArray(payload.interactiveCandidates) && payload.interactiveCandidates.length)
+        ? payload.interactiveCandidates
+        : (payload.manifest || payload.privacy?.safeManifest || []);
+
+      const candidates = rawCandidates.map((m, idx) => ({
+        id: idx,
+        tag: m.tag || (m.role === 'input' || m.type === 'input' ? 'input' : 'button'),
+        text: m.text || m.label || m.name || m.placeholder || m.type || '',
+        selector: m.selector || m.regionId || '',
+      })).filter(c => c.text || c.selector);
+
+      if (candidates.length) {
+        const mlxResult = await probeLayaMlxFastPath(task, candidates, 150, settings.mlxBaseUrl || 'http://127.0.0.1:8181');
+        if (mlxResult && mlxResult.confidence >= 0.70 && mlxResult.selector) {
+          console.log(`[TechyMind] ⚡ MLX Metal Reflex HIT (${mlxResult.latency_ms}ms, conf=${mlxResult.confidence.toFixed(2)}) -> target: ${mlxResult.selector}`);
+          return {
+            actionPlan: {
+              thought: `[Laya MLX Metal Reflex ${mlxResult.latency_ms}ms] Fast micro-action on target`,
+              action: {
+                type: mlxResult.action || 'click',
+                selector: mlxResult.selector,
+                text: mlxResult.text || '',
+              },
+              confidence: mlxResult.confidence,
+              is_complete: false,
+            },
+            backend: `apple-silicon-mlx (Metal GPU ${mlxResult.latency_ms}ms)`,
+            manifestSummary: candidates.length,
+            networkLatencyMs: Math.round(mlxResult.latency_ms),
+          };
+        }
+      }
+    } catch {
+      // Fail-soft: seamlessly proceed to standard provider path
+    }
+  }
+
   // 2) Direct provider path — no companion server required
   if (isProviderConfigured(settings)) {
     if (!caps.vision) {
@@ -861,6 +902,7 @@ export async function decideViaServer(payload, task, history = [], providerSetti
       images,
       maxTokens: sp.maxTokens,
       reasoningEffort: sp.reasoningEffort,
+      signal: extra.signal,
     });
     const latencyMs = Math.round(performance.now() - t0);
     return {
@@ -925,7 +967,7 @@ export async function decideViaServer(payload, task, history = [], providerSetti
   fd.append('settings', serverSettings);
 
   const t0 = performance.now();
-  const resp = await fetch(url, { method: 'POST', body: fd });
+  const resp = await fetch(url, { method: 'POST', body: fd, signal: extra.signal });
   const latencyMs = Math.round(performance.now() - t0);
   if (!resp.ok) {
     const errText = await resp.text();
@@ -1060,7 +1102,7 @@ function pageContextScan() {
   try {
     const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'IFRAME', 'SVG', 'CANVAS']);
     const agentOwnedEl = (el) => {
-      try { return !!(el && el.closest && el.closest('[id^="open-comet-"]')); } catch { return false; }
+      try { return !!(el && el.closest && el.closest('[id^="techymind-"], [id^="open-comet-"]')); } catch { return false; }
     };
     const pushed = sensitive.map(r => r.bounds); // dedupe against field regions
     const overlaps = (b) => pushed.some(q =>
@@ -1273,7 +1315,7 @@ function pageContextScan() {
   const dialogTexts = [];
   try {
     const agentOwned = el => {
-      try { return !!(el && el.closest && el.closest('[id^="open-comet-"]')); } catch { return false; }
+      try { return !!(el && el.closest && el.closest('[id^="techymind-"], [id^="open-comet-"]')); } catch { return false; }
     };
     for (const d of document.querySelectorAll('[role=dialog],[aria-modal=true]')) {
       if (dialogTexts.length >= 3) break;
@@ -1290,7 +1332,7 @@ function pageContextScan() {
       const p = node.parentElement;
       if (!p) return NodeFilter.FILTER_REJECT;
       if (SKIP.has(p.tagName)) return NodeFilter.FILTER_REJECT;
-      try { if (p.closest && p.closest('[id^="open-comet-"]')) return NodeFilter.FILTER_REJECT; } catch {}
+      try { if (p.closest && p.closest('[id^="techymind-"], [id^="open-comet-"]')) return NodeFilter.FILTER_REJECT; } catch {}
       const t = node.nodeValue.trim();
       if (t.length < 2) return NodeFilter.FILTER_REJECT;
       const r = p.getBoundingClientRect();
@@ -1372,7 +1414,34 @@ function pageContextScan() {
     visualSig = `${h36(imgParts.join('|'))}.${h36(canvasParts.join('|'))}`;
   } catch { visualSig = ''; }
 
-  return { sensitive, text, census, photoCandidates, pixelTextRects, visualSig };
+  const interactive = [];
+  try {
+    const addInteractive = (el, role = 'button') => {
+      if (!el) return;
+      try {
+        if (el.closest && el.closest('#techymind-agent-overlay, #open-comet-agent-overlay, [id^="techymind-"], [id^="open-comet-"]')) return;
+      } catch {}
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0 || r.bottom < 0 || r.top > winH || r.right < 0 || r.left > winW) return;
+      const s = window.getComputedStyle(el);
+      if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return;
+      const text = (el.getAttribute('aria-label') || el.placeholder || el.innerText || el.textContent || el.value || el.title || '').trim().slice(0, 80);
+      if (!text && el.tagName !== 'INPUT') return;
+      interactive.push({
+        tag: el.tagName.toLowerCase(),
+        text,
+        selector: buildSelector(el),
+        role,
+        bounds: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
+      });
+    };
+
+    document.querySelectorAll('input[type="search"], input[name*="search" i], input[placeholder*="search" i], input[type="text"], input:not([type]), textarea').forEach(el => addInteractive(el, 'input'));
+    document.querySelectorAll('button, input[type="submit"], input[type="button"], [role="button"], a.btn, a.button').forEach(el => addInteractive(el, 'button'));
+    document.querySelectorAll('div[data-component-type="s-search-result"] h2 a, ytd-video-renderer a#video-title, main article a, main h2 a, main h3 a').forEach(el => addInteractive(el, 'content_link'));
+  } catch {}
+
+  return { sensitive, text, census, photoCandidates, pixelTextRects, visualSig, interactive: interactive.slice(0, 48) };
 }
 
 // On-device / provider decision prompt
@@ -1523,6 +1592,24 @@ USER CONTEXT (typed by the user DURING this task — high-priority guidance; fol
 ${userNotes}
 ` : ''}
 RULES:
+- AUTONOMOUS EXECUTION: Do NOT pause or ask the user for confirmation, options, or which item to choose. Execute the actions autonomously step-by-step. Never output "ask_user" during web searches, YouTube video playback, product selection, or form filling.
+- YOUTUBE / SEARCH AUTOMATION: When asked to open, search, or play something on YouTube or any search engine:
+  1) If not already on YouTube/the search site, navigate to it (e.g. "https://www.youtube.com").
+  2) When the search input is visible, type the user's search query into the search box ("input#search", "input[name='search_query']", or selector "Search").
+  3) Immediately queue or press key "Enter" to submit the search.
+  4) On the results page, click the first matching video title or thumbnail (e.g. "ytd-video-renderer #video-title", "a#video-title", or the first video card). Do NOT ask the user which song or video to pick!
+- E-COMMERCE AUTOMATION (Flipkart / Amazon):
+  1) When asked to search, find, or view products (e.g. "shoes under 1000", "laptops", etc.):
+     If not already on the store, navigate to it (e.g. "https://www.flipkart.com" or "https://www.amazon.in").
+  2) In the search box, type the search query and press key "Enter" immediately.
+  3) On the search results page, autonomously click the first matching product card or title (e.g. "div[data-id] a", "a._1fQEk", "a.s1Q9rs", "div[data-component-type='s-search-result'] h2 a"). Do NOT ask the user which product to choose!
+  4) When the product page is open, complete the task.
+- FORM AUTOFILL: When you encounter input fields (e.g. Name/Full Name, Email, Phone/Mobile, Address, City, State, Pin Code/Zip, Company, etc.):
+  1) Inspect the input labels and placeholders.
+  2) Look up the corresponding values in the USER PROFILE below.
+  3) Immediately emit "type" actions filling those fields with the profile values.
+- PAGE SUMMARIZATION: When the task is to summarize the page or answer a question from page content:
+  Deliver the complete markdown summary immediately in action.message on the very first step with {"type":"done","message":"...","is_complete":true}. Do not emit ask_user or wait.
 - Every action is VERIFIED by diffing the page (url/title/scroll/media/dialogs/fields/focus). If your history says "NO visible change", that click was INEFFECTIVE — choose a DIFFERENT approach next.
 - Never guess redacted values; treat them as opaque.
 - To pause/play/mute media, prefer {"type":"media","command":"…"} — it drives the <video>/<audio> element directly and works even when the player is hidden. After an ineffective player click, DO NOT click the player again — use media.
@@ -1573,5 +1660,5 @@ Reply with ONE JSON object and NOTHING else (no prose, no markdown fences):
   "is_complete": true | false
 }
 
-Only declare is_complete=true when a VERIFIED observation confirms the task (page state or history shows the effect actually happened) — EXCEPT information/summary tasks, which complete by delivering the full answer in action.message. If you cannot determine the next action, use "ask_user".`;
+Only declare is_complete=true when a VERIFIED observation confirms the task (page state or history shows the effect actually happened) — EXCEPT information/summary tasks, which complete by delivering the full answer in action.message. Take decisive, proactive action towards accomplishing the user's goal. Only use "ask_user" if you hit an insurmountable security barrier that requires user credentials.`;
 }

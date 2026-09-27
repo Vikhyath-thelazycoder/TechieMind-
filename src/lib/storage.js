@@ -91,7 +91,7 @@ export async function appendHistory(entry) {
   const history = await getHistory();
   // stamped + URL-scrubbed before it touches disk.
   history.unshift({ stateVersion: STATE_VERSION, ...sanitizeUrlFields(entry) });
-  if (history.length > 30) history.pop();
+  if (history.length > 60) history.pop();
   await chrome.storage.local.set({ [STORAGE_KEYS.HISTORY]: history });
 }
 
@@ -130,7 +130,7 @@ export async function initStorage() {
   // schema this code cannot interpret — reset to defaults rather than act on
   // misread values. Older/unstamped state merges forward (standard migration).
   if (typeof stored.stateVersion === 'number' && stored.stateVersion > STATE_VERSION) {
-    console.warn(`[Storage] Settings were written by a newer OpenComet build (state v${stored.stateVersion} > v${STATE_VERSION}). Resetting settings to defaults to avoid misreading newer schema.`);
+    console.warn(`[Storage] Settings were written by a newer TechyMind build (state v${stored.stateVersion} > v${STATE_VERSION}). Resetting settings to defaults to avoid misreading newer schema.`);
     await chrome.storage.local.set({
       [STORAGE_KEYS.SETTINGS]: { ...DEFAULT_SETTINGS, stateVersion: STATE_VERSION },
     });
@@ -150,11 +150,12 @@ export async function initStorage() {
 }
 
 // Skills storage ()
-const SKILLS_KEY = 'opencometSkills';
+const SKILLS_KEY = 'techymindSkills';
+const LEGACY_SKILLS_KEY = 'opencometSkills';
 
 export async function getStoredSkills() {
-  const data = await chrome.storage.local.get(SKILLS_KEY);
-  return data[SKILLS_KEY] || [];
+  const data = await chrome.storage.local.get([SKILLS_KEY, LEGACY_SKILLS_KEY]);
+  return data[SKILLS_KEY] || data[LEGACY_SKILLS_KEY] || [];
 }
 
 export async function storeSkill(skill) {

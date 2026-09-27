@@ -1,0 +1,19 @@
+{
+  "meta": {
+    "type": "techymind-bench-summary",
+    "generatedAt": "2026-09-27T04:58:53.073Z",
+    "tiers": [
+      "unit"
+    ],
+    "note": "Orchestrator republish — every verdict and report path comes verbatim from the per-tier harness output; nothing is recomputed or asserted here."
+  },
+  "results": [
+    {
+      "tier": "unit",
+      "status": "PASS",
+      "report": "/Users/vikhyathmgowda007/Developer/ssssss/Techy Mind ai/TechyMindBench/results/unit-1790485133072.json",
+      "durationMs": 84
+    }
+  ],
+  "allRanTiersPassed": true
+}

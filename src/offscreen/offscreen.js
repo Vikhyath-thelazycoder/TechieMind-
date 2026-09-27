@@ -1,5 +1,5 @@
 // src/offscreen/offscreen.js
-// The offscreen ML document for Open Comet.
+// The offscreen ML document for TechyMind.
 //
 // Runs the entire on-device perception + generation stack:
 //   • Transformers.js (vendored)  — VLM/LLM inference + weight downloads

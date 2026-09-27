@@ -10,22 +10,24 @@
 //   - nested interactive elements collapse into their parent unless they
 //     represent a distinct interaction of their own.
 //
-// The scan emits Open Comet element items (uid, role, text, bounds, xpath…)
+// The scan emits TechyMind element items (uid, role, text, bounds, xpath…)
 // consumed by sw.js getPageInfo; the uid attribute doubles as the
 // click/type relocation key. Cross-origin frames are out of scope — they
 // carry an error marker and are skipped.
 
 (() => {
   'use strict';
-  if (window.__opencometDomDetector) return;
+  if (window.__techymindDomDetector || window.__opencometDomDetector) return;
+  window.__techymindDomDetector = true;
   window.__opencometDomDetector = true;
 
-  const HIGHLIGHT_CONTAINER_ID = 'oc-dom-highlight-container';
-  const UID_ATTR = 'data-opencomet-agent-uid';
+  const HIGHLIGHT_CONTAINER_ID = 'techymind-dom-highlight-container';
+  const UID_ATTR = 'data-techymind-agent-uid';
+  const LEGACY_UID_ATTR = 'data-opencomet-agent-uid';
 
   // Live uid -> element map for relocation after SPA re-renders. Registered
   // elements survive querySelector misses inside shadow roots and iframes.
-  const registry = (window.__openCometElRegistry = window.__openCometElRegistry || new Map());
+  const registry = (window.__techymindElRegistry = window.__openCometElRegistry = (window.__techymindElRegistry || window.__openCometElRegistry || new Map()));
   const REGISTRY_LIMIT = 400;
 
   const BOX_COLORS = [
@@ -269,7 +271,7 @@
   function isAgentOwned(el) {
     try {
       return !!(el && el.closest && el.closest(
-        '[id^="open-comet-"], #' + HIGHLIGHT_CONTAINER_ID + ', #__opencomet_capture_overlay'
+        '[id^="techymind-"], [id^="open-comet-"], [class*="techymind-"], #' + HIGHLIGHT_CONTAINER_ID + ', #oc-dom-highlight-container, #__techymind_capture_overlay, #__opencomet_capture_overlay, #__techymind_cursor__, #__techymind_target_highlight__'
       ));
     } catch {
       return false;
@@ -394,7 +396,7 @@
       };
       window.addEventListener('scroll', reposition, true);
       window.addEventListener('resize', reposition);
-      (window.__openCometBoxCleanup = window.__openCometBoxCleanup || []).push(() => {
+      (window.__techymindBoxCleanup = window.__openCometBoxCleanup = (window.__techymindBoxCleanup || window.__openCometBoxCleanup || [])).push(() => {
         window.removeEventListener('scroll', reposition, true);
         window.removeEventListener('resize', reposition);
         overlays.forEach(o => o.el.remove());
@@ -405,13 +407,15 @@
     }
   }
 
-  window.__openCometDomRemoveBoxes = function () {
+  window.__techymindDomRemoveBoxes = window.__openCometDomRemoveBoxes = function () {
     try {
-      (window.__openCometBoxCleanup || []).forEach(fn => {
+      (window.__techymindBoxCleanup || window.__openCometBoxCleanup || []).forEach(fn => {
         try { fn(); } catch { /* already torn down */ }
       });
+      window.__techymindBoxCleanup = [];
       window.__openCometBoxCleanup = [];
       document.getElementById(HIGHLIGHT_CONTAINER_ID)?.remove();
+      document.getElementById('oc-dom-highlight-container')?.remove();
     } catch {
       // container may already be gone with a navigation
     }
@@ -447,8 +451,8 @@
     const scanDoc = doc => {
       if (!doc || scanned.has(doc)) return;
       scanned.add(doc);
-      for (const el of doc.querySelectorAll(`[${UID_ATTR}]`)) {
-        const m = /^nx-(\d+)$/.exec(el.getAttribute(UID_ATTR) || '');
+      for (const el of doc.querySelectorAll(`[${UID_ATTR}], [${LEGACY_UID_ATTR}]`)) {
+        const m = /^nx-(\d+)$/.exec(el.getAttribute(UID_ATTR) || el.getAttribute(LEGACY_UID_ATTR) || '');
         if (m) used.add(Number(m[1]));
       }
       for (const frame of doc.querySelectorAll('iframe')) {
@@ -522,14 +526,19 @@
   let maxElements = 150;
 
   function nextUid(el) {
-    const existing = el.getAttribute(UID_ATTR);
-    if (existing && /^nx-\d+$/.test(existing)) return existing;
+    const existing = el.getAttribute(UID_ATTR) || el.getAttribute(LEGACY_UID_ATTR);
+    if (existing && /^nx-\d+$/.test(existing)) {
+      el.setAttribute(UID_ATTR, existing);
+      el.setAttribute(LEGACY_UID_ATTR, existing);
+      return existing;
+    }
     let n = uidCounter + 1;
     while (usedUidNumbers.has(n)) n += 1;
     usedUidNumbers.add(n);
     uidCounter = n;
     const uid = `nx-${n}`;
     el.setAttribute(UID_ATTR, uid);
+    el.setAttribute(LEGACY_UID_ATTR, uid);
     return uid;
   }
 
@@ -720,7 +729,7 @@
 
   let paintBoxes = true;
 
-  window.__openCometDomDetect = function (options = {}) {
+  window.__techymindDomDetect = window.__openCometDomDetect = function (options = {}) {
     const {
       paint = true,
       maxElements: cap = 150,
@@ -736,7 +745,7 @@
     cache.clientRects = new WeakMap();
     cache.styles = new WeakMap();
 
-    if (paint) window.__openCometDomRemoveBoxes();
+    if (paint) (window.__techymindDomRemoveBoxes || window.__openCometDomRemoveBoxes)();
 
     if (document.body) traverse(document.body, null, false, 0);
 

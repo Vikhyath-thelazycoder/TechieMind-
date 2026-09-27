@@ -17,7 +17,8 @@
     "bookmarks",
     "alarms",
     "pageCapture",
-    "readingList"
+    "readingList",
+    "declarativeNetRequest"
   ],
   "host_permissions": [
     "<all_urls>",
@@ -46,8 +47,12 @@
         "<all_urls>"
       ],
       "js": [
+        "src/content/visual-overlay.js",
         "src/content/agent.js",
         "src/content/dom-detector.js"
+      ],
+      "css": [
+        "src/content/visual-overlay.css"
       ],
       "run_at": "document_idle",
       "all_frames": false
@@ -56,7 +61,9 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "assets/icons/*.png"
+        "assets/icons/*.png",
+        "TechyMindBench/pages/*.html",
+        "TechyMindBench/*.html"
       ],
       "matches": [
         "<all_urls>"
@@ -64,7 +71,7 @@
     }
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; connect-src 'self' https: http://127.0.0.1:* http://localhost:* data: blob:; img-src 'self' data: blob: https:; worker-src 'self'; style-src 'self' 'unsafe-inline';"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; connect-src 'self' https: http://127.0.0.1:* http://localhost:* data: blob:; img-src 'self' data: blob: https:; worker-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:;"
   },
   "icons": {
     "16": "assets/icons/icon16.png",

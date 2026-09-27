@@ -210,6 +210,7 @@ export async function callAIRaw(settings, prompt, options = {}) {
           temperature: 0.3,
           max_tokens: 4000,
         }),
+        signal: options.signal,
       });
       await assertOk(res, provider);
       const data = await res.json();
@@ -237,6 +238,7 @@ export async function callAIRaw(settings, prompt, options = {}) {
           messages: [{ role: 'user', content: prompt }],
           max_tokens: 4000,
         }),
+        signal: options.signal,
       });
       await assertOk(res, 'Anthropic');
       const data = await res.json();
@@ -260,6 +262,7 @@ export async function callAIRaw(settings, prompt, options = {}) {
             contents: [{ role: 'user', parts: [{ text: prompt }] }],
             generationConfig: { temperature: 0.3, maxOutputTokens: 4000 },
           }),
+          signal: options.signal,
         }
       );
       await assertOk(res, 'Gemini');
@@ -284,6 +287,7 @@ export async function callAIRaw(settings, prompt, options = {}) {
           temperature: 0.3,
           max_tokens: 4000,
         }),
+        signal: options.signal,
       });
       await assertOk(res, 'Mistral');
       const data = await res.json();
@@ -310,6 +314,7 @@ export async function callAIRaw(settings, prompt, options = {}) {
           temperature: 0.3,
           max_tokens: 4000,
         }),
+        signal: options.signal,
       });
       await assertOk(res, providerLabel(provider));
       const data = await res.json();
@@ -333,6 +338,7 @@ export async function callAIRaw(settings, prompt, options = {}) {
           temperature: 0.3,
           max_tokens: 4000,
         }),
+        signal: options.signal,
       });
       await assertOk(res, 'Ollama');
       const data = await res.json();
@@ -379,6 +385,7 @@ async function callAnthropic(apiKey, model, prompt, images, options = {}) {
       messages:  [{ role: 'user', content }],
       max_tokens: 2500,
     }),
+    signal: options.signal,
   });
   await assertOk(res, 'Anthropic');
   const data = await res.json();
@@ -419,6 +426,7 @@ async function callOpenAI(apiKey, model, prompt, images, options = {}) {
       max_tokens:      2500,
       response_format: { type: 'json_object' },
     }),
+    signal: options.signal,
   });
   await assertOk(res, 'OpenAI');
   const data = await res.json();
@@ -452,6 +460,7 @@ async function callGemini(apiKey, model, prompt, images, options = {}) {
         contents:          [{ role: 'user', parts }],
         generationConfig:  { responseMimeType: 'application/json', temperature: 0.1, maxOutputTokens: 2500 },
       }),
+      signal: options.signal,
     }
   );
   await assertOk(res, 'Gemini');
@@ -482,6 +491,7 @@ async function callGroq(apiKey, model, prompt, options = {}) {
       max_tokens:      2500,
       response_format: { type: 'json_object' },
     }),
+    signal: options.signal,
   });
   await assertOk(res, 'Groq');
   const data = await res.json();
@@ -521,6 +531,7 @@ async function callMistral(apiKey, model, prompt, images, options = {}) {
           max_tokens:      2500,
           response_format: { type: 'json_object' },
         }),
+        signal: options.signal,
       });
       await assertOk(res, 'Mistral');
       const data = await res.json();
@@ -586,6 +597,7 @@ async function callOllama(settings, model, prompt, images, options = {}) {
         method: 'POST',
         headers: buildOllamaHeaders(settings),
         body: JSON.stringify(attempt.body),
+        signal: options.signal,
       });
       await assertOk(res, 'Ollama');
       const data = await res.json();
@@ -780,6 +792,17 @@ export async function callOpenAICompatible(settings, model, prompt, images, opti
       if (esc?.thinkOff) Object.assign(body, { enable_thinking: false, chat_template_kwargs: { enable_thinking: false } });
 
       const ctrl = new AbortController();
+      const onParentAbort = () => {
+        const err = options.signal?.reason instanceof Error
+          ? options.signal.reason
+          : new Error(options.signal?.reason ? String(options.signal.reason) : 'aborted by user');
+        err.name = 'AbortError';
+        try { ctrl.abort(err); } catch (_) { ctrl.abort(); }
+      };
+      if (options.signal) {
+        if (options.signal.aborted) onParentAbort();
+        else options.signal.addEventListener('abort', onParentAbort, { once: true });
+      }
       const attemptTimer = setTimeout(() => {
         const err = new Error(`no completion within ${Math.round(Math.min(attemptMs, remaining) / 1000)}s`);
         err.name = 'AbortError';
@@ -883,6 +906,7 @@ export async function callOpenAICompatible(settings, model, prompt, images, opti
         logVlmRawText(tag, rawContent);
         return parseJSON(rawContent);
       } catch (err) {
+        if (options.signal?.aborted) throw err;
         if (isAbortError(err) && canEscalate(esc, i)) {
           lastErr = err;
           logAPI.warn(`⏱ ${tag} · ${attemptTag(a, esc)} · ${describeHttpError(err)} — escalating`);
@@ -891,6 +915,7 @@ export async function callOpenAICompatible(settings, model, prompt, images, opti
         throw err;
       } finally {
         clearTimeout(attemptTimer);
+        try { options.signal?.removeEventListener?.('abort', onParentAbort); } catch (_) {}
       }
     }
   }
@@ -1090,7 +1115,7 @@ function resolveOllamaBaseUrl(settings = {}) {
 
 function buildOllamaHeaders(settings = {}) {
   const headers = { 'Content-Type': 'application/json' };
-  const apiKey = String(settings.apiKey || '').trim();
+  const apiKey = String(settings.ollamaApiKey || '').trim();
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
   return headers;
 }

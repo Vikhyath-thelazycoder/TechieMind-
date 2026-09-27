@@ -1,0 +1,30 @@
+{
+  "meta": {
+    "type": "techymind-bench-summary",
+    "generatedAt": "2026-09-25T03:23:09.982Z",
+    "tiers": [
+      "unit",
+      "e2e"
+    ],
+    "note": "Orchestrator republish — every verdict and report path comes verbatim from the per-tier harness output; nothing is recomputed or asserted here."
+  },
+  "results": [
+    {
+      "tier": "unit",
+      "status": "PASS",
+      "report": "/Users/vikhyathmgowda007/Developer/ssssss/OpenCometAI/TechyMindBench/results/unit-1790304546921.json",
+      "durationMs": 59
+    },
+    {
+      "tier": "e2e",
+      "status": "FAIL",
+      "report": "TechyMindBench/results/e2e-benchmark-1789722314277.json",
+      "tasks": "10 tasks · 21 steps",
+      "taskSuccessRatio": 1,
+      "verifiedActionRatio": 1,
+      "durationMs": 2043057,
+      "stderr": ""
+    }
+  ],
+  "allRanTiersPassed": false
+}

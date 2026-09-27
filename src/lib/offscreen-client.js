@@ -79,7 +79,8 @@ function sendViaRuntime(message, { timeoutMs }) {
 
 // Transport B — Firefox in-page ML runtime (hidden iframe + postMessage)
 
-const ML_FRAME_ID = 'opencomet-ml-frame';
+const ML_FRAME_ID = 'techymind-ml-frame';
+const LEGACY_ML_FRAME_ID = 'opencomet-ml-frame';
 const FRAME_READY_TIMEOUT_MS = 30 * 1000;
 
 /** rpcId → { resolve, reject, timer }; the window 'message' listener drains it. */

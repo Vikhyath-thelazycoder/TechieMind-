@@ -1,4 +1,4 @@
-// sidepanel.js — Open Comet UI controller
+// sidepanel.js — TechyMind UI controller
 import { loadLibrarySkills, peekLibrarySkills } from '../lib/skill-library.js';
 import { createLogger, installGlobalErrorTraps } from '../core/logger.js';
 
@@ -58,8 +58,13 @@ let filteredSlashSkills = [];
 
 // Sounds
 function playNotificationSound(type = 'complete') {
-  const audio = new Audio(`../../assets/sounds/${type}.mp3`);
-  audio.play().catch(e => console.warn('[Sound] Playback inhibited:', e));
+  try {
+    const audio = new Audio(`../../assets/sounds/${type}.mp3`);
+    audio.volume = 0.20;
+    audio.play().catch(e => console.warn('[Sound] Playback inhibited:', e));
+  } catch (err) {
+    console.warn('[Sound] Play error:', err);
+  }
 }
 
 // DOM refs (all null-safe)
@@ -207,13 +212,25 @@ function getProviderDefaultBaseUrl(provider) {
 }
 
 // NAVIGATION
-function showView(name) {
-  if (name === 'settings') {
-    if (chrome.runtime?.openOptionsPage) {
+function openSettingsWebpage() {
+  try {
+    if (typeof chrome !== 'undefined' && chrome.runtime?.openOptionsPage) {
       chrome.runtime.openOptionsPage();
+    } else if (typeof chrome !== 'undefined' && chrome.tabs?.create) {
+      chrome.tabs.create({ url: chrome.runtime.getURL('src/settings/settings.html') });
     } else {
+      window.open('../settings/settings.html', '_blank');
+    }
+  } catch {
+    if (typeof chrome !== 'undefined' && chrome.tabs?.create) {
       chrome.tabs.create({ url: chrome.runtime.getURL('src/settings/settings.html') });
     }
+  }
+}
+
+function showView(name) {
+  if (name === 'settings') {
+    openSettingsWebpage();
     return;
   }
 
@@ -289,13 +306,13 @@ const modelPillBtn = $('modelPillBtn');
 
 if (navAgent)       navAgent.addEventListener('click',       () => showView('agent'));
 if (navHistory)     navHistory.addEventListener('click',     () => showView('history'));
-if (navSettings)    navSettings.addEventListener('click',    () => showView('settings'));
+if (navSettings)    navSettings.addEventListener('click',    () => openSettingsWebpage());
 if (topNavAgent)    topNavAgent.addEventListener('click',    () => showView('agent'));
 if (topNavHistory)  topNavHistory.addEventListener('click',  () => showView('history'));
 const toolbarSettingsBtn = $('toolbarSettingsBtn');
-if (toolbarSettingsBtn) toolbarSettingsBtn.addEventListener('click', () => showView('settings'));
+if (toolbarSettingsBtn) toolbarSettingsBtn.addEventListener('click', () => openSettingsWebpage());
 const suggestSettingsBtn = $('suggestSettingsBtn');
-if (suggestSettingsBtn) suggestSettingsBtn.addEventListener('click', () => showView('settings'));
+if (suggestSettingsBtn) suggestSettingsBtn.addEventListener('click', () => openSettingsWebpage());
 if (modelPillBtn) modelPillBtn.addEventListener('click', e => {
   e.stopPropagation();
   toggleModelSelector();
@@ -309,6 +326,12 @@ if (newChatBtn) {
     resetConversationUI({ clearInput: true });
     showView('agent');
     taskInput?.focus();
+  });
+}
+const openTabBtn = $('openTabBtn');
+if (openTabBtn) {
+  openTabBtn.addEventListener('click', () => {
+    chrome.tabs.create({ url: chrome.runtime.getURL('src/sidepanel/sidepanel.html') });
   });
 }
 
@@ -354,6 +377,9 @@ function initVoiceRecognition() {
     console.warn('[TechyMind][Voice] Error:', event.error);
     isVoiceListening = false;
     if (voiceInputBtn) voiceInputBtn.classList.remove('listening');
+    if (event.error === 'not-allowed' || event.error === 'audio-capture') {
+      requestMicrophonePermissionInTab();
+    }
   };
 
   rec.onend = () => {
@@ -361,6 +387,12 @@ function initVoiceRecognition() {
     if (voiceInputBtn) voiceInputBtn.classList.remove('listening');
   };
   return rec;
+}
+
+function requestMicrophonePermissionInTab() {
+  const url = chrome.runtime.getURL('src/settings/settings.html?grantMic=1');
+  chrome.tabs.create({ url, active: true });
+  addStep('info', '🎙️ Microphone permission required for voice input. Please click "Allow" in the tab that just opened.');
 }
 
 if (voiceLangBtn) {
@@ -373,20 +405,33 @@ if (voiceLangBtn) {
 }
 
 if (voiceInputBtn) {
-  voiceInputBtn.addEventListener('click', () => {
+  voiceInputBtn.addEventListener('click', async () => {
     if (!recognition) recognition = initVoiceRecognition();
     if (!recognition) {
       alert('Speech recognition is not supported in this browser.');
       return;
     }
     if (isVoiceListening) {
-      recognition.stop();
+      try { recognition.stop(); } catch {}
     } else {
+      try {
+        if (navigator.permissions && navigator.permissions.query) {
+          const p = await navigator.permissions.query({ name: 'microphone' });
+          if (p.state === 'denied') {
+            requestMicrophonePermissionInTab();
+            return;
+          }
+        }
+      } catch {}
+
       try {
         recognition.lang = VOICE_LANGS[currentVoiceLangIndex].code;
         recognition.start();
       } catch (err) {
         console.warn('[TechyMind][Voice] Start error:', err);
+        if (String(err?.message || '').includes('already started')) {
+          try { recognition.stop(); } catch {}
+        }
       }
     }
   });
@@ -505,6 +550,79 @@ function speakVoiceSummary(rawText) {
   }
 }
 
+// ── File & Image Attachment Handling (📎 Multi-Modal Analysis) ──
+let currentAttachment = null;
+const attachFileBtn = $('attachFileBtn');
+const fileAttachmentInput = $('fileAttachmentInput');
+const attachmentPreviewBar = $('attachmentPreviewBar');
+const attachmentName = $('attachmentName');
+const attachmentThumb = $('attachmentThumb');
+const attachmentRemoveBtn = $('attachmentRemoveBtn');
+
+function setAttachment(file) {
+  if (!file) return;
+  const isImage = file.type.startsWith('image/');
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    currentAttachment = {
+      name: file.name,
+      type: file.type || 'application/octet-stream',
+      size: file.size,
+      dataUrl: e.target.result,
+      isImage,
+    };
+    if (attachmentName) attachmentName.textContent = file.name;
+    if (attachmentThumb) {
+      if (isImage) {
+        attachmentThumb.src = e.target.result;
+        attachmentThumb.style.display = 'block';
+      } else {
+        attachmentThumb.style.display = 'none';
+      }
+    }
+    if (attachmentPreviewBar) attachmentPreviewBar.style.display = 'block';
+  };
+  reader.readAsDataURL(file);
+}
+
+function clearAttachment() {
+  currentAttachment = null;
+  if (attachmentPreviewBar) attachmentPreviewBar.style.display = 'none';
+  if (attachmentThumb) { attachmentThumb.src = ''; attachmentThumb.style.display = 'none'; }
+  if (fileAttachmentInput) fileAttachmentInput.value = '';
+}
+
+if (attachFileBtn && fileAttachmentInput) {
+  attachFileBtn.addEventListener('click', () => {
+    fileAttachmentInput.click();
+  });
+  fileAttachmentInput.addEventListener('change', (e) => {
+    const file = e.target.files?.[0];
+    if (file) setAttachment(file);
+  });
+}
+
+if (attachmentRemoveBtn) {
+  attachmentRemoveBtn.addEventListener('click', clearAttachment);
+}
+
+// Drag & drop into task input
+if (taskInput) {
+  taskInput.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    taskInput.classList.add('drag-over');
+  });
+  taskInput.addEventListener('dragleave', () => {
+    taskInput.classList.remove('drag-over');
+  });
+  taskInput.addEventListener('drop', (e) => {
+    e.preventDefault();
+    taskInput.classList.remove('drag-over');
+    const file = e.dataTransfer?.files?.[0];
+    if (file) setAttachment(file);
+  });
+}
+
 const openSkillsBtn  = $('openSkillsBtn');
 const skillsBackBtn = $('skillsBackBtn');
 const settingsBackBtn = $('settingsBackBtn');
@@ -548,7 +666,10 @@ document.querySelectorAll('.mode-option').forEach(opt => {
     // persist the choice — ask mode now genuinely changes behaviour
     // (it gates every privacy-run action behind an approval card), so losing
     // it on every panel reload made the feature feel dead.
-    try { localStorage.setItem('opencometAgentMode', currentMode); } catch {}
+    try {
+      localStorage.setItem('techymindAgentMode', currentMode);
+      localStorage.setItem('opencometAgentMode', currentMode);
+    } catch {}
     closeModeDropdown();
   });
 });
@@ -559,7 +680,7 @@ if (modeLabel) modeLabel.textContent = 'Act without asking';
 
 // …then restore the persisted mode (default 'auto').
 try {
-  const savedMode = localStorage.getItem('opencometAgentMode');
+  const savedMode = localStorage.getItem('techymindAgentMode') || localStorage.getItem('opencometAgentMode');
   if (savedMode === 'ask' || savedMode === 'auto') {
     const savedOpt = document.querySelector(`.mode-option[data-mode="${savedMode}"]`);
     if (savedOpt) {
@@ -670,7 +791,6 @@ function getComposerPlaceholder() {
 
 function updateComposerState() {
   if (taskInput) taskInput.placeholder = getComposerPlaceholder();
-  if (runContextHint) runContextHint.classList.toggle('visible', isRunning && currentRunKind === 'agent');
   if (researchOptionsBar) researchOptionsBar.classList.toggle('visible', !isRunning && inputTab === 'deep_research');
   if (scrapeOptionsBar) scrapeOptionsBar.classList.toggle('visible', !isRunning && inputTab === 'scrape');
 
@@ -678,13 +798,18 @@ function updateComposerState() {
   if (modeToggle) modeToggle.style.display = inputTab === 'chat' ? '' : 'none';
 
   if (sendBtn) {
+    sendBtn.style.display = 'flex';
     sendBtn.title = isRunning && currentRunKind === 'agent'
-      ? 'Add context'
+      ? 'Send follow-up / command'
       : inputTab === 'deep_research'
         ? 'Deep Research'
         : inputTab === 'scrape'
           ? 'Scrape'
-        : 'Run';
+          : 'Run';
+  }
+  if (stopBtn) {
+    stopBtn.style.display = isRunning ? 'flex' : 'none';
+    stopBtn.classList.toggle('visible', isRunning);
   }
 }
 
@@ -784,13 +909,21 @@ async function addRunningNote() {
  */
 async function submitComposer() {
   if (!taskInput) return;
+  const rawText = taskInput.value.trim();
+  if (!rawText) return;
+
   if (isRunning) {
     if (currentRunKind !== 'agent') {
       addStep('error', 'Live extra context is only supported for browser tasks right now.');
       return;
     }
-    await addRunningNote();
-    return;
+    // If user explicitly marks input as a note, add to notes
+    if (/^note\s*:/i.test(rawText)) {
+      await addRunningNote();
+      return;
+    }
+    // Otherwise it is an actionable multi-turn follow-up command ("play first song", "now check amazon").
+    // Proceed to dispatch as an active steering turn!
   }
   if (inputTab === 'deep_research') runDeepResearch();
   else if (inputTab === 'scrape') runScrapePage();
@@ -800,7 +933,11 @@ async function submitComposer() {
 if (sendBtn) sendBtn.addEventListener('click', submitComposer);
 if (taskInput) {
   taskInput.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    if (e.key === 'Enter' && !e.shiftKey && !slashMenuOpen) {
+      e.preventDefault();
+      submitComposer();
+    } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
       submitComposer();
     }
   });
@@ -826,15 +963,17 @@ async function runAgent() {
     return;
   }
 
+  const attachmentToSend = currentAttachment;
+  clearAttachment();
   hideEmpty();
-  appendUserBubble(task);
+  appendUserBubble(task, attachmentToSend);
   agentBlockEl = appendAgentBlock();
   currentRunKind = 'agent';
   setRunning(true);
   taskInput.value = '';
   autoResizeTA();
 
-  chrome.runtime.sendMessage({ type: 'START_AGENT', task, mode: currentMode, sessionId: currentSessionId }, resp => {
+  chrome.runtime.sendMessage({ type: 'START_AGENT', task, attachment: attachmentToSend, mode: currentMode, sessionId: currentSessionId }, resp => {
     if (chrome.runtime.lastError) {
       addStep('error', `❌ ${chrome.runtime.lastError.message}`);
       setRunning(false);
@@ -939,13 +1078,12 @@ chrome.runtime.onMessage.addListener(msg => {
       currentRunKind = 'agent';
       setRunning(true);
       if (msg.state) hydrateFromAgentState(msg.state);
-      else requestAgentStateHydration({ force: true });
+      else requestAgentStateHydration({ force: false });
       break;
 
     case 'STEP_UPDATE': {
       if (msg.sessionId && currentSessionId && currentSessionId !== msg.sessionId) {
-        requestAgentStateHydration({ force: true });
-        break;
+        currentSessionId = msg.sessionId;
       }
       if (msg.sessionId && !currentSessionId) currentSessionId = msg.sessionId;
       renderIncomingStep(msg.step);
@@ -965,6 +1103,10 @@ chrome.runtime.onMessage.addListener(msg => {
 
     case 'APPROVAL_REQUIRED':
       renderApprovalCard(msg.approval);
+      break;
+
+    case 'TECHYMIND_HANDOVER_REQUIRED':
+      renderHandoverCard(msg.handover);
       break;
 
     case 'AGENT_DONE':
@@ -1018,6 +1160,7 @@ chrome.runtime.onMessage.addListener(msg => {
       setRunning(false);
       const sumAns = msg.summary || msg.answer || 'Summary complete.';
       renderResultCard(sumAns);
+      renderHistory();
       playNotificationSound('complete');
       speakVoiceSummary(sumAns);
       break;
@@ -1033,6 +1176,7 @@ chrome.runtime.onMessage.addListener(msg => {
       currentRunKind = null;
       setRunning(false);
       renderScrapeCard(msg.task, msg.dataset || msg.result, msg.page || msg.dataset, msg.exports || msg.exportMeta);
+      renderHistory();
       playNotificationSound('complete');
       speakVoiceSummary('Page data extracted successfully. You can review the results on screen.');
       break;
@@ -1146,14 +1290,14 @@ function hydrateFromAgentState(state, { force = false } = {}) {
 
   const steps = Array.isArray(state.steps) ? state.steps : [];
   const sessionKey = state.sessionId || (state.task ? '__active__' : '');
-  const sessionChanged = Boolean(sessionKey && sessionKey !== currentSessionId);
-  const shouldReset = force || sessionChanged;
 
-  if (shouldReset) {
+  if (force) {
     resetConversationUI({ clearInput: false });
     resetRenderedSessionState();
     currentSessionId = sessionKey;
   } else if (!currentSessionId && sessionKey) {
+    currentSessionId = sessionKey;
+  } else if (sessionKey) {
     currentSessionId = sessionKey;
   }
 
@@ -1161,7 +1305,11 @@ function hydrateFromAgentState(state, { force = false } = {}) {
 
   const taskSessionKey = sessionKey || '__task__';
   if (state.task && restoredTaskSessionKey !== taskSessionKey) {
-    appendUserBubble(state.task);
+    const lastUserBubble = document.querySelector('.msg-user:last-of-type');
+    const lastBubbleText = lastUserBubble ? lastUserBubble.textContent.trim() : '';
+    if (!lastBubbleText || !lastBubbleText.includes(state.task.trim())) {
+      appendUserBubble(state.task);
+    }
     restoredTaskSessionKey = taskSessionKey;
   }
 
@@ -1178,12 +1326,29 @@ function hydrateFromAgentState(state, { force = false } = {}) {
   }
 }
 
-function appendUserBubble(text) {
+function appendUserBubble(text, attachment = null) {
   const convoArea = $('convoArea');
   if (!convoArea) return;
   const el = document.createElement('div');
   el.className = 'msg-user';
-  el.textContent = text;
+  if (attachment) {
+    const attDiv = document.createElement('div');
+    attDiv.className = 'msg-user-attachment';
+    attDiv.style.cssText = 'display:flex;align-items:center;gap:6px;margin-bottom:6px;padding:4px 8px;background:rgba(255,255,255,0.12);border-radius:6px;font-size:12px;';
+    if (attachment.isImage && attachment.dataUrl) {
+      const img = document.createElement('img');
+      img.src = attachment.dataUrl;
+      img.style.cssText = 'width:36px;height:36px;object-fit:cover;border-radius:4px;';
+      attDiv.appendChild(img);
+    }
+    const nameSpan = document.createElement('span');
+    nameSpan.textContent = `📎 ${attachment.name || 'Attachment'}`;
+    attDiv.appendChild(nameSpan);
+    el.appendChild(attDiv);
+  }
+  const textSpan = document.createElement('div');
+  textSpan.textContent = text;
+  el.appendChild(textSpan);
   convoArea.appendChild(el);
   scrollConvo();
 }
@@ -1457,12 +1622,12 @@ function renderPlanCard(plan) {
         <rect x="1.5" y="1.5" width="11" height="11" rx="2"/>
         <line x1="4" y1="5" x2="10" y2="5"/><line x1="4" y1="7.5" x2="8" y2="7.5"/><line x1="4" y1="10" x2="7" y2="10"/>
       </svg>
-      Open Comet's plan
+      TechyMind's plan
     </div>
     <div class="plan-card-body">
       ${sites ? `<div><div class="plan-sec-label">Allow actions on these sites</div>${sites}</div>` : ''}
       ${steps ? `<div><div class="plan-sec-label">Approach to follow</div>${steps}</div>` : ''}
-      <div class="plan-note">Open Comet will only use the sites and tools listed. You'll be asked before accessing anything else.</div>
+      <div class="plan-note">TechyMind will only use the sites and tools listed. You'll be asked before accessing anything else.</div>
       ${showApprovalButtons ? `<div class="plan-btns">
         <button class="btn-approve" data-action="approve">
           <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -1504,11 +1669,13 @@ function renderApprovalCard(approval) {
   // ask mode) gets the three Claude-style verdicts; legacy host-access cards
   // keep Allow once / Cancel.
   const isAction = approval.kind === 'action';
+  const proposal = approval.proposal || null;
   const card = document.createElement('div');
   card.className = 'approval-card';
   card.innerHTML = `
     <div class="approval-title">${isAction ? '🤔 Ask before acting' : '⚠️ Approval needed'}</div>
     <div class="approval-msg">${esc(approval.message || 'The agent needs permission to continue.')}</div>
+    ${proposal?.hash ? `<div style="font-size: 11px; color: #38bdf8; font-family: monospace; margin-bottom: 8px; background: rgba(56, 189, 248, 0.08); padding: 4px 8px; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.2);">🔒 SHA-256 Seal: ${esc(proposal.hash.slice(0, 24))}...</div>` : ''}
     <div class="approval-btns">
       <button class="btn-allow" data-action="allow">Allow once</button>
       ${isAction ? '<button class="btn-skip" data-action="skip">Skip</button>' : ''}
@@ -1532,6 +1699,36 @@ function renderApprovalCard(approval) {
   card.querySelector('[data-action="stop"], [data-action="deny"]').addEventListener('click', () => {
     resolve(isAction ? 'stop' : 'cancel');
     setRunning(false);
+  });
+}
+
+// Handover card for CAPTCHAs, OTPs, and security checkpoints
+function renderHandoverCard(handover) {
+  if (!handover || !agentBlockEl) return;
+  const card = document.createElement('div');
+  card.className = 'approval-card handover-card';
+  card.style.borderColor = '#f59e0b';
+  card.style.background = 'rgba(245, 158, 11, 0.08)';
+  card.innerHTML = `
+    <div class="approval-title" style="color: #f59e0b;">✋ Human Handover Required</div>
+    <div class="approval-msg">${esc(handover.reason || 'Security gate reached. Please complete verification in your browser tab.')}</div>
+    <div style="font-size: 11px; color: var(--tx2); margin-bottom: 10px; font-family: monospace;">Holder: HUMAN · Agent Docked</div>
+    <div class="approval-btns">
+      <button class="btn-allow" data-action="resume" style="background: #f59e0b; color: #000; font-weight: 600;">Resume Agent</button>
+      <button class="btn-deny" data-action="stop">Stop Task</button>
+    </div>`;
+  agentBlockEl.appendChild(card);
+  scrollConvo();
+
+  card.querySelector('[data-action="resume"]').addEventListener('click', () => {
+    card.remove();
+    chrome.runtime.sendMessage({ type: 'RESUME_AFTER_HANDOVER', handoverId: handover.id });
+    agentBlockEl = appendAgentBlock();
+  });
+  card.querySelector('[data-action="stop"]').addEventListener('click', () => {
+    card.remove();
+    setRunning(false);
+    chrome.runtime.sendMessage({ type: 'STOP_TASK' });
   });
 }
 
@@ -1734,7 +1931,13 @@ function renderResultCard(answer) {
 // RUNNING STATE
 function setRunning(on) {
   isRunning = on;
-  if (stopBtn) stopBtn.classList.toggle('visible', on);
+  if (stopBtn) {
+    stopBtn.style.display = on ? 'flex' : 'none';
+    stopBtn.classList.toggle('visible', on);
+  }
+  if (sendBtn) {
+    sendBtn.style.display = 'flex';
+  }
   if (!on) stopLiveStepTimer();   // run finished/failed — freeze any live timer
 
   // When running: input area stays pinned at bottom (CSS handles layout),
@@ -1973,7 +2176,7 @@ async function loadSettings() {
     if (inlineDrMaxSitesInput) inlineDrMaxSitesInput.value = settings.deepResearchMaxSites || 6;
     if (inlineDrSearchEngineSelect) inlineDrSearchEngineSelect.value = settings.deepResearchSearchEngine || 'google';
     if (exportFormatInput) exportFormatInput.value = settings.exportFormat || 'json';
-    if (exportFolderInput) exportFolderInput.value = settings.exportFolder || 'Open Comet Exports';
+    if (exportFolderInput) exportFolderInput.value = settings.exportFolder || 'TechyMind Exports';
     if (exportDiskLabelInput) exportDiskLabelInput.value = settings.exportDiskLabel || 'Default Downloads';
     if (exportPromptInput) exportPromptInput.checked = Boolean(settings.exportPrompt);
     if (autoExportScrapesInput) autoExportScrapesInput.checked = Boolean(settings.autoExportScrapes);
@@ -2126,7 +2329,7 @@ async function saveSettings() {
       useSubAgents: $('useSubAgentsInput') ? $('useSubAgentsInput').checked : true,
       subAgentConcurrency: $('subAgentConcurrencyInput') ? (parseInt($('subAgentConcurrencyInput').value, 10) || 3) : 3,
       exportFormat: $('exportFormatInput') ? $('exportFormatInput').value : 'json',
-      exportFolder: $('exportFolderInput') ? $('exportFolderInput').value.trim() : 'Open Comet Exports',
+      exportFolder: $('exportFolderInput') ? $('exportFolderInput').value.trim() : 'TechyMind Exports',
       exportDiskLabel: $('exportDiskLabelInput') ? $('exportDiskLabelInput').value.trim() : 'Default Downloads',
       exportPrompt: $('exportPromptInput') ? $('exportPromptInput').checked : false,
       autoExportScrapes: $('autoExportScrapesInput') ? $('autoExportScrapesInput').checked : false,
@@ -2236,31 +2439,71 @@ function renderHistory() {
       list.innerHTML = '<div class="history-empty">No tasks run yet.</div>';
       return;
     }
-    list.innerHTML = history.map(h => {
+    list.innerHTML = history.map((h, idx) => {
       const usageHtml = (h.tokens || h.cost)
         ? `<span class="hdot"></span><span>${h.tokens || 0} tokens ` +
           (h.cost > 0 ? `($${h.cost.toFixed(4)})` : '') + `</span>`
         : '';
+      const resultHtml = h.result ? `<div class="history-result-snippet">${esc(h.result)}</div>` : '';
         
       return `
-      <div class="history-item" data-task="${esc(h.task)}">
+      <div class="history-item" data-index="${idx}" data-task="${esc(h.task)}">
         <div class="history-task">${esc(h.task)}</div>
+        ${resultHtml}
         <div class="history-meta">
-          <span class="badge ${h.status || 'done'}">${h.status || 'done'}</span>
-          <span class="hdot"></span>
-          <span>${h.steps || 0} steps</span>
-          <span class="hdot"></span>
-          <span>${fmtTime(h.time)}</span>
-          ${usageHtml}
+          <div class="history-meta-left">
+            <span class="badge ${h.status || 'done'}">${h.status || 'done'}</span>
+            <span class="hdot"></span>
+            <span>${h.steps || 0} step${h.steps === 1 ? '' : 's'}</span>
+            <span class="hdot"></span>
+            <span>${fmtTime(h.time)}</span>
+            ${usageHtml}
+          </div>
+          <div class="history-actions">
+            ${h.result ? `<button type="button" class="history-action-btn copy-result-btn" data-result="${esc(h.result)}" title="Copy Result">Copy</button>` : ''}
+            <button type="button" class="history-action-btn rerun-btn" data-task="${esc(h.task)}" title="Rerun task">Rerun</button>
+          </div>
         </div>
       </div>`;
     }).join('');
-    list.querySelectorAll('.history-item').forEach(item => {
-      item.addEventListener('click', () => {
-        if (taskInput) taskInput.value = item.dataset.task;
+
+    list.querySelectorAll('.copy-result-btn').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        const text = btn.dataset.result || '';
+        navigator.clipboard.writeText(text).then(() => {
+          btn.textContent = 'Copied!';
+          setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+        }).catch(() => {});
+      });
+    });
+
+    list.querySelectorAll('.rerun-btn').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        if (taskInput) taskInput.value = btn.dataset.task;
         showView('agent');
         if (taskInput) taskInput.focus();
         autoResizeTA();
+      });
+    });
+
+    list.querySelectorAll('.history-item').forEach(item => {
+      item.addEventListener('click', () => {
+        const idx = parseInt(item.dataset.index, 10);
+        const entry = history[idx];
+        if (!entry) return;
+        showView('agent');
+        hideEmpty();
+        appendUserBubble(entry.task);
+        if (entry.result) {
+          renderResultCard(entry.result);
+        }
+        if (taskInput) {
+          taskInput.value = entry.task;
+          taskInput.focus();
+          autoResizeTA();
+        }
       });
     });
   });
@@ -2504,8 +2747,10 @@ const BUILT_IN_SKILLS = [
   { id: 'builtin_form_filler', name: 'Smart Form Filler', icon: '📝', category: 'Form Filling', builtIn: true, description: 'Fill form fields', prompt: 'Fill visible inputs safely', allowedHosts: [], preferredSites: [], doneChecklist: [] },
 ];
 
-const USER_SKILLS_KEY = 'opencometSkills';
-const USER_SKILL_META_KEY = 'opencometSkillMeta';
+const USER_SKILLS_KEY = 'techymindSkills';
+const LEGACY_USER_SKILLS_KEY = 'opencometSkills';
+const USER_SKILL_META_KEY = 'techymindSkillMeta';
+const LEGACY_USER_SKILL_META_KEY = 'opencometSkillMeta';
 
 function skillToMeta(skill) {
   return {
@@ -2567,21 +2812,21 @@ async function loadSkills() {
 
 function getStoredSkills() {
   return new Promise(resolve => {
-    chrome.storage.local.get(USER_SKILLS_KEY, data => {
-      resolve(data[USER_SKILLS_KEY] || []);
+    chrome.storage.local.get([USER_SKILLS_KEY, LEGACY_USER_SKILLS_KEY], data => {
+      resolve(data[USER_SKILLS_KEY] || data[LEGACY_USER_SKILLS_KEY] || []);
     });
   });
 }
 
 function getStoredSkillMeta() {
   return new Promise(resolve => {
-    chrome.storage.local.get([USER_SKILL_META_KEY, USER_SKILLS_KEY], data => {
-      const meta = data[USER_SKILL_META_KEY];
+    chrome.storage.local.get([USER_SKILL_META_KEY, LEGACY_USER_SKILL_META_KEY, USER_SKILLS_KEY, LEGACY_USER_SKILLS_KEY], data => {
+      const meta = data[USER_SKILL_META_KEY] || data[LEGACY_USER_SKILL_META_KEY];
       if (Array.isArray(meta) && meta.length) {
         resolve(meta);
         return;
       }
-      const derived = (data[USER_SKILLS_KEY] || []).map(skillToMeta);
+      const derived = (data[USER_SKILLS_KEY] || data[LEGACY_USER_SKILLS_KEY] || []).map(skillToMeta);
       chrome.storage.local.set({ [USER_SKILL_META_KEY]: derived }, () => resolve(derived));
     });
   });
@@ -2923,7 +3168,6 @@ const _origRunAgent = window.runAgent;
 
 async function runAgentWithSkills() {
   let task = taskInput?.value.trim();
-  if (isRunning) return;
 
   const settings = await getSettingsBg();
   if (!isProviderConfigured(settings)) {
@@ -2941,7 +3185,9 @@ async function runAgentWithSkills() {
   if (!task && (skillIds.has('builtin_web_scraper') || skillIds.has('extract-data'))) task = 'Scrape the current page';
   if (!task) return;
 
-  appendUserBubble(task);
+  const attachmentToSend = currentAttachment;
+  clearAttachment();
+  appendUserBubble(task, attachmentToSend);
 
   if (skillIds.has('builtin_summarise') || skillIds.has('summarize-page')) {
     agentBlockEl = appendAgentBlock();
@@ -2999,6 +3245,7 @@ async function runAgentWithSkills() {
   chrome.runtime.sendMessage({
     type: inputTab === 'deep_research' ? 'DEEP_RESEARCH' : 'START_AGENT',
     task,
+    attachment: attachmentToSend,
     mode:   currentMode,
     skills: activeSkills,
     sessionId: currentSessionId,
@@ -3249,10 +3496,10 @@ async function selectLocalModel(id) {
 // All ML work now runs in the offscreen document — its logs and progress
 // arrive here as broadcasts so the user can follow them in this console.
 chrome.runtime.onMessage.addListener((msg) => {
-  // SW warn/error diagnostics relayed into this console ([Open Comet:<ns>]).
+  // SW warn/error diagnostics relayed into this console ([TechyMind:<ns>]).
   if (msg?.type === 'DIAG_LOG' && msg.text) {
     const style = `color:${msg.level === 'error' ? '#f87171' : '#fbbf24'};font-weight:600;font-family:monospace`;
-    console[msg.level === 'error' ? 'error' : 'warn'](`%c[Open Comet:${msg.ns}]`, style, msg.text);
+    console[msg.level === 'error' ? 'error' : 'warn'](`%c[TechyMind:${msg.ns}]`, style, msg.text);
     return;
   }
   if (msg?.type === 'LOCAL_MODEL_LOG' && msg.text) {
@@ -3440,9 +3687,9 @@ requestAgentStateHydration({ force: true });
 
   // Load saved config
   try {
-    const saved = JSON.parse(localStorage.getItem('opencometPrivacyConfig') || 'null');
+    const saved = JSON.parse(localStorage.getItem('techymindPrivacyConfig') || localStorage.getItem('opencometPrivacyConfig') || 'null');
     if (saved) privacyConfig = { ...privacyConfig, ...saved };
-    const savedEnabled = localStorage.getItem('opencometPrivacyEnabled');
+    const savedEnabled = localStorage.getItem('techymindPrivacyEnabled') ?? localStorage.getItem('opencometPrivacyEnabled');
     if (savedEnabled !== null) privacyEnabled = savedEnabled === '1';
   } catch {}
 
@@ -3523,7 +3770,10 @@ requestAgentStateHydration({ force: true });
 
   function setPrivacyEnabled(enabled, { fromSettings = false } = {}) {
     privacyEnabled = enabled;
-    localStorage.setItem('opencometPrivacyEnabled', privacyEnabled ? '1' : '0');
+    try {
+      localStorage.setItem('techymindPrivacyEnabled', privacyEnabled ? '1' : '0');
+      localStorage.setItem('opencometPrivacyEnabled', privacyEnabled ? '1' : '0');
+    } catch {}
     if (toggle) toggle.checked = privacyEnabled;
     if (settingsToggle) settingsToggle.checked = privacyEnabled;
     updatePrivacyChip();
@@ -3539,7 +3789,10 @@ requestAgentStateHydration({ force: true });
   }
 
   function persistConfig() {
-    try { localStorage.setItem('opencometPrivacyConfig', JSON.stringify(privacyConfig)); } catch {}
+    try {
+      localStorage.setItem('techymindPrivacyConfig', JSON.stringify(privacyConfig));
+      localStorage.setItem('opencometPrivacyConfig', JSON.stringify(privacyConfig));
+    } catch {}
   }
 
   function sendConfigure() {
@@ -3571,6 +3824,14 @@ requestAgentStateHydration({ force: true });
     };
   }
 
+  function formatBackendLabel(b) {
+    if (!b || b === '—') return '—';
+    const lower = String(b).toLowerCase();
+    if (lower.includes('webgpu')) return 'Local GPU (Apple Silicon)';
+    if (lower.includes('wasm')) return 'Local CPU (WASM)';
+    return b;
+  }
+
   function updateStats(result) {
     if (!result?.stats) return;
     const s = result.stats;
@@ -3579,7 +3840,8 @@ requestAgentStateHydration({ force: true });
     psLastMs.textContent  = `${s.totalMs || 0}ms`;
     psFaces.textContent   = String(c.faces || 0);
     psPii.textContent     = String((c.domSensitive || 0) + (c.textPii || 0));
-    psBackend.textContent = s.backend || '—';
+    psBackend.textContent = formatBackendLabel(s.backend);
+    psBackend.title = "100% on-device hardware-accelerated processing via WebGPU API";
     // mirror the REAL firewall envelope into the inspector table.
     if (result.inspector) renderInspector(result.inspector);
   }
@@ -3774,26 +4036,40 @@ requestAgentStateHydration({ force: true });
       const data = JSON.parse(await file.text());
       if (Array.isArray(data?.results)) {
         scorecardFromBenchmarks(data);
-        try { localStorage.setItem('opencometSihBenchmarks', JSON.stringify(data)); } catch {}
+        try {
+          localStorage.setItem('techymindSihBenchmarks', JSON.stringify(data));
+          localStorage.setItem('opencometSihBenchmarks', JSON.stringify(data));
+        } catch {}
         flashSaved('UNIT benchmark imported');
       } else if (data?.meta?.type === 'browser' || data?.redactionMatrix || data?.visualContext) {
         scorecardFromBrowser(data, file.name);
         try {
+          localStorage.setItem('techymindSihBrowserBenchmarks', JSON.stringify(data));
+          localStorage.setItem('techymindSihBrowserBenchmarksName', file.name);
           localStorage.setItem('opencometSihBrowserBenchmarks', JSON.stringify(data));
           localStorage.setItem('opencometSihBrowserBenchmarksName', file.name);
         } catch {}
         flashSaved('BROWSER benchmark imported');
       } else if (data?.meta?.type === 'e2e' && !String(data?.meta?.vlm || '').startsWith('real')) {
         scorecardFromE2e(data);
-        try { localStorage.setItem('opencometSihE2eBenchmarks', JSON.stringify(data)); } catch {}
+        try {
+          localStorage.setItem('techymindSihE2eBenchmarks', JSON.stringify(data));
+          localStorage.setItem('opencometSihE2eBenchmarks', JSON.stringify(data));
+        } catch {}
         flashSaved('E2E (mock-VLM) benchmark imported');
       } else if (data?.meta?.type === 'adversarial') {
         scorecardFromAdversarial(data);
-        try { localStorage.setItem('opencometSihAdversarialBenchmarks', JSON.stringify(data)); } catch {}
+        try {
+          localStorage.setItem('techymindSihAdversarialBenchmarks', JSON.stringify(data));
+          localStorage.setItem('opencometSihAdversarialBenchmarks', JSON.stringify(data));
+        } catch {}
         flashSaved('Adversarial benchmark imported');
       } else if (data?.meta?.type === 'e2e-real') {
         scorecardFromE2eReal(data);
-        try { localStorage.setItem('opencometSihE2eRealBenchmarks', JSON.stringify(data)); } catch {}
+        try {
+          localStorage.setItem('techymindSihE2eRealBenchmarks', JSON.stringify(data));
+          localStorage.setItem('opencometSihE2eRealBenchmarks', JSON.stringify(data));
+        } catch {}
         flashSaved('E2E-REAL benchmark imported (kept separate from mock rows)');
       } else if (data?.sanitizeMs) {
         // legacy browser runner export
@@ -3808,18 +4084,18 @@ requestAgentStateHydration({ force: true });
   });
   // Restore previously imported benchmark JSONs (persisted, still measured data).
   try {
-    const saved = localStorage.getItem('opencometSihBenchmarks');
+    const saved = localStorage.getItem('techymindSihBenchmarks') || localStorage.getItem('opencometSihBenchmarks');
     if (saved) scorecardFromBenchmarks(JSON.parse(saved));
-    const savedBrowser = localStorage.getItem('opencometSihBrowserBenchmarks');
-    if (savedBrowser) scorecardFromBrowser(JSON.parse(savedBrowser), localStorage.getItem('opencometSihBrowserBenchmarksName') || '');
-    const savedE2e = localStorage.getItem('opencometSihE2eBenchmarks');
+    const savedBrowser = localStorage.getItem('techymindSihBrowserBenchmarks') || localStorage.getItem('opencometSihBrowserBenchmarks');
+    if (savedBrowser) scorecardFromBrowser(JSON.parse(savedBrowser), localStorage.getItem('techymindSihBrowserBenchmarksName') || localStorage.getItem('opencometSihBrowserBenchmarksName') || '');
+    const savedE2e = localStorage.getItem('techymindSihE2eBenchmarks') || localStorage.getItem('opencometSihE2eBenchmarks');
     if (savedE2e) scorecardFromE2e(JSON.parse(savedE2e));
-    const savedAdv = localStorage.getItem('opencometSihAdversarialBenchmarks');
+    const savedAdv = localStorage.getItem('techymindSihAdversarialBenchmarks') || localStorage.getItem('opencometSihAdversarialBenchmarks');
     if (savedAdv) scorecardFromAdversarial(JSON.parse(savedAdv));
-    const savedReal = localStorage.getItem('opencometSihE2eRealBenchmarks');
+    const savedReal = localStorage.getItem('techymindSihE2eRealBenchmarks') || localStorage.getItem('opencometSihE2eRealBenchmarks');
     if (savedReal) scorecardFromE2eReal(JSON.parse(savedReal));
     // restore the last live-task report (privacy census + latency).
-    const savedLive = localStorage.getItem('opencometSihLiveRun');
+    const savedLive = localStorage.getItem('techymindSihLiveRun') || localStorage.getItem('opencometSihLiveRun');
     if (savedLive) {
       const lr = JSON.parse(savedLive);
       scorecardFromRun(lr.latencyProfile, lr.privacy, lr.steps);
@@ -3836,12 +4112,14 @@ requestAgentStateHydration({ force: true });
     if (summary.latencyProfile || summary.privacy) {
       scorecardFromRun(summary.latencyProfile, summary.privacy, summary.steps);
       try {
-        localStorage.setItem('opencometSihLiveRun', JSON.stringify({
+        const livePayload = JSON.stringify({
           ts: new Date().toISOString(),
           steps: summary.steps,
           latencyProfile: summary.latencyProfile || null,
           privacy: summary.privacy || null,
-        }));
+        });
+        localStorage.setItem('techymindSihLiveRun', livePayload);
+        localStorage.setItem('opencometSihLiveRun', livePayload);
       } catch { /* storage blocked — live rows just won't persist */ }
     }
   });
@@ -3943,7 +4221,7 @@ console.log(`[TechyMind] v${_ocV} · side panel`);
     // While SIH mode is on, the privacy-off master switch is locked ON.
     if (master) {
       master.disabled = on;
-      if (on) { master.checked = true; try { localStorage.setItem('opencometPrivacyEnabled', '1'); } catch {} }
+      if (on) { master.checked = true; try { localStorage.setItem('techymindPrivacyEnabled', '1'); localStorage.setItem('opencometPrivacyEnabled', '1'); } catch {} }
     }
   };
 

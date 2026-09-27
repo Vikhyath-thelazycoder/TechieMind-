@@ -36,6 +36,8 @@ async function initSettings() {
 
   // AI & Ollama
   if ($('ollamaBaseUrl')) $('ollamaBaseUrl').value = currentSettings.ollamaBaseUrl || 'http://127.0.0.1:11434';
+  if ($('mlxFastPathToggle')) $('mlxFastPathToggle').checked = currentSettings.mlxFastPathEnabled !== false && currentSettings.mlxFastPath !== false;
+  if ($('mlxBaseUrl')) $('mlxBaseUrl').value = currentSettings.mlxBaseUrl || 'http://127.0.0.1:8181';
   if ($('compatibleBaseUrl')) $('compatibleBaseUrl').value = currentSettings.providerBaseUrl || '';
   if ($('compatibleApiKey')) $('compatibleApiKey').value = currentSettings.apiKey || '';
   if ($('compatibleModel')) $('compatibleModel').value = currentSettings.model || '';
@@ -53,6 +55,10 @@ async function initSettings() {
   if ($('profPhone')) $('profPhone').value = prof.phone || '';
   if ($('profCompany')) $('profCompany').value = prof.company || '';
   if ($('profAddress')) $('profAddress').value = prof.address || '';
+  if ($('profCity')) $('profCity').value = prof.city || '';
+  if ($('profState')) $('profState').value = prof.state || '';
+  if ($('profPincode')) $('profPincode').value = prof.pincode || '';
+  if ($('profCountry')) $('profCountry').value = prof.country || 'India';
 
   // Export
   if ($('exportFormat')) $('exportFormat').value = currentSettings.exportFormat || 'json';
@@ -61,14 +67,17 @@ async function initSettings() {
   // Privacy Wall
   let privacyConfig = { blurFaces: true, redactDomPii: true, redactTextPii: true, maskIndianId: true };
   try {
-    const savedConfig = JSON.parse(localStorage.getItem('opencometPrivacyConfig') || 'null');
+    const savedConfig = JSON.parse(localStorage.getItem('techymindPrivacyConfig') || localStorage.getItem('opencometPrivacyConfig') || 'null');
     if (savedConfig) privacyConfig = { ...privacyConfig, ...savedConfig };
-    const savedEnabled = localStorage.getItem('opencometPrivacyEnabled');
+    const savedEnabled = localStorage.getItem('techymindPrivacyEnabled') ?? localStorage.getItem('opencometPrivacyEnabled');
     if ($('privacyEnabledToggle')) $('privacyEnabledToggle').checked = savedEnabled !== '0';
     if ($('blurFacesToggle')) $('blurFacesToggle').checked = privacyConfig.blurFaces !== false;
     if ($('redactDomPiiToggle')) $('redactDomPiiToggle').checked = privacyConfig.redactDomPii !== false;
     if ($('indianPiiToggle')) $('indianPiiToggle').checked = privacyConfig.maskIndianId !== false;
   } catch {}
+
+  if ($('tabGroupingToggle')) $('tabGroupingToggle').checked = currentSettings.enableTabGrouping === true;
+  if ($('speedProfileSelect')) $('speedProfileSelect').value = currentSettings.vlmSpeedProfile || 'fast';
 
   // Voice & Audio
   const voiceEngine = currentSettings.voiceInputEngine || 'webspeech';
@@ -87,11 +96,66 @@ async function initSettings() {
   if ($('voiceOutputToggle')) $('voiceOutputToggle').checked = currentSettings.voiceOutputEnabled !== false;
   if ($('voicePersonaSelect')) $('voicePersonaSelect').value = currentSettings.voicePersona || 'female';
 
+  updateMicPermissionUI();
+  if (window.location.search.includes('grantMic=1') || window.location.hash.includes('grantMic')) {
+    const aiTabBtn = document.querySelector('.sub-nav-btn[data-sub="voice"]');
+    if (aiTabBtn) aiTabBtn.click();
+    requestMicPermission();
+  }
+
   // Populate Skills Grid
   renderSkills();
 
   await checkOllamaStatus();
   await refreshOllamaModels();
+  await checkMlxStatus();
+}
+
+async function updateMicPermissionUI() {
+  const statusEl = $('micPermissionStatus');
+  const grantBtn = $('grantMicBtn');
+  if (!statusEl) return;
+  try {
+    if (navigator.permissions && navigator.permissions.query) {
+      const res = await navigator.permissions.query({ name: 'microphone' });
+      if (res.state === 'granted') {
+        statusEl.textContent = '✅ Microphone access granted! Side panel voice input is active.';
+        statusEl.style.color = '#34d399';
+        if (grantBtn) grantBtn.textContent = 'Permission Granted';
+      } else if (res.state === 'denied') {
+        statusEl.textContent = '❌ Microphone access blocked in Chrome settings. Click lock icon in URL bar to unblock.';
+        statusEl.style.color = '#f87171';
+        if (grantBtn) grantBtn.textContent = 'Blocked by Browser';
+      } else {
+        statusEl.textContent = 'Microphone permission not yet granted. Click "Allow Microphone" to enable.';
+        statusEl.style.color = 'var(--text-muted)';
+        if (grantBtn) grantBtn.textContent = 'Allow Microphone';
+      }
+    }
+  } catch {}
+}
+
+async function requestMicPermission() {
+  const statusEl = $('micPermissionStatus');
+  const grantBtn = $('grantMicBtn');
+  if (statusEl) {
+    statusEl.textContent = 'Requesting access... Please click "Allow" in Chrome\'s prompt above.';
+    statusEl.style.color = 'var(--text-secondary)';
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach(t => t.stop());
+    if (statusEl) {
+      statusEl.textContent = '✅ Microphone access granted! You can now use voice input in the side panel.';
+      statusEl.style.color = '#34d399';
+    }
+    if (grantBtn) grantBtn.textContent = 'Permission Granted';
+  } catch (err) {
+    if (statusEl) {
+      statusEl.textContent = `❌ Microphone access denied: ${err.message}. Please click the lock/settings icon in the URL bar to allow microphone.`;
+      statusEl.style.color = '#f87171';
+    }
+  }
 }
 
 // Built-in & Custom Skills Management (Complete 12-skill offline fallback)
@@ -286,8 +350,8 @@ async function loadSettingsSkills() {
       resolve([...baseSkills]);
       return;
     }
-    chrome.storage.local.get('opencometSkills', data => {
-      const userSkills = data['opencometSkills'] || [];
+    chrome.storage.local.get(['techymindSkills', 'opencometSkills'], data => {
+      const userSkills = data['techymindSkills'] || data['opencometSkills'] || [];
       const seen = new Set();
       // User customized skills take precedence
       const merged = [...userSkills, ...baseSkills].filter(s => {
@@ -403,8 +467,8 @@ $('settingsSkillSaveBtn')?.addEventListener('click', async () => {
   };
 
   if (chrome.storage?.local) {
-    chrome.storage.local.get(['opencometSkills', 'opencometSkillMeta'], data => {
-      const skills = data['opencometSkills'] || [];
+    chrome.storage.local.get(['techymindSkills', 'techymindSkillMeta', 'opencometSkills', 'opencometSkillMeta'], data => {
+      const skills = data['techymindSkills'] || data['opencometSkills'] || [];
       const idx = skills.findIndex(s => s.id === skillData.id);
       if (idx >= 0) {
         skills[idx] = skillData;
@@ -426,6 +490,8 @@ $('settingsSkillSaveBtn')?.addEventListener('click', async () => {
       }));
 
       chrome.storage.local.set({
+        techymindSkills: skills,
+        techymindSkillMeta: meta,
         opencometSkills: skills,
         opencometSkillMeta: meta,
       }, () => {
@@ -444,10 +510,12 @@ $('settingsSkillDeleteBtn')?.addEventListener('click', () => {
   if (!confirm('Are you sure you want to delete this custom skill?')) return;
 
   if (chrome.storage?.local) {
-    chrome.storage.local.get(['opencometSkills', 'opencometSkillMeta'], data => {
-      const skills = (data['opencometSkills'] || []).filter(s => s.id !== editingSettingsSkillId);
-      const meta = (data['opencometSkillMeta'] || []).filter(s => s.id !== editingSettingsSkillId);
+    chrome.storage.local.get(['techymindSkills', 'techymindSkillMeta', 'opencometSkills', 'opencometSkillMeta'], data => {
+      const skills = (data['techymindSkills'] || data['opencometSkills'] || []).filter(s => s.id !== editingSettingsSkillId);
+      const meta = (data['techymindSkillMeta'] || data['opencometSkillMeta'] || []).filter(s => s.id !== editingSettingsSkillId);
       chrome.storage.local.set({
+        techymindSkills: skills,
+        techymindSkillMeta: meta,
         opencometSkills: skills,
         opencometSkillMeta: meta,
       }, () => {
@@ -500,6 +568,33 @@ async function refreshOllamaModels() {
   } catch {}
 }
 
+// Laya MLX Metal Daemon Test
+async function checkMlxStatus() {
+  const baseUrl = ($('mlxBaseUrl')?.value || 'http://127.0.0.1:8181').trim().replace(/\/+$/, '');
+  const dot = $('mlxStatusDot');
+  const msg = $('mlxStatusMsg');
+  if (msg) msg.textContent = 'Checking MLX Metal daemon…';
+
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 2500);
+    const res = await fetch(`${baseUrl}/health`, { signal: ctrl.signal });
+    clearTimeout(t);
+    if (res.ok) {
+      const data = await res.json();
+      if (dot) { dot.className = 'dot online'; }
+      if (msg) {
+        msg.textContent = `Online — Metal GPU Active (${data.device || 'gpu'}) · Engine: ${data.engine || 'mlx'} · v${data.version || '1.0'}`;
+      }
+      return true;
+    }
+  } catch {}
+
+  if (dot) { dot.className = 'dot offline'; }
+  if (msg) msg.textContent = `Offline — Daemon not running at ${baseUrl}. (Seamless fallback to Gemma 3 Ollama active)`;
+  return false;
+}
+
 // Save Settings
 async function saveSettings() {
   const saveBtn = $('saveAllSettingsBtn');
@@ -509,6 +604,9 @@ async function saveSettings() {
     ...currentSettings,
     ollamaBaseUrl: $('ollamaBaseUrl')?.value.trim() || 'http://127.0.0.1:11434',
     ollamaTextModel: $('ollamaModelSelect')?.value || currentSettings.ollamaTextModel || 'gemma3:12b',
+    mlxFastPath: $('mlxFastPathToggle')?.checked !== false,
+    mlxFastPathEnabled: $('mlxFastPathToggle')?.checked !== false,
+    mlxBaseUrl: $('mlxBaseUrl')?.value.trim() || 'http://127.0.0.1:8181',
     providerBaseUrl: $('compatibleBaseUrl')?.value.trim() || '',
     apiKey: $('compatibleApiKey')?.value.trim() || '',
     model: $('ollamaModelSelect')?.value || currentSettings.model || 'gemma3:12b',
@@ -524,11 +622,17 @@ async function saveSettings() {
       phone: $('profPhone')?.value.trim() || '',
       company: $('profCompany')?.value.trim() || '',
       address: $('profAddress')?.value.trim() || '',
+      city: $('profCity')?.value.trim() || '',
+      state: $('profState')?.value.trim() || '',
+      pincode: $('profPincode')?.value.trim() || '',
+      country: $('profCountry')?.value.trim() || 'India',
     },
     voiceInputEngine: $('voiceInputEngine')?.value || 'webspeech',
     whisperApiKey: $('whisperApiKey')?.value.trim() || '',
     voiceOutputEnabled: $('voiceOutputToggle')?.checked !== false,
     voicePersona: $('voicePersonaSelect')?.value || 'female',
+    enableTabGrouping: $('tabGroupingToggle')?.checked === true,
+    vlmSpeedProfile: $('speedProfileSelect')?.value || 'fast',
   };
 
   await chrome.storage.local.set({
@@ -540,6 +644,7 @@ async function saveSettings() {
   // Persist Privacy Wall settings
   try {
     const privEnabled = $('privacyEnabledToggle')?.checked !== false;
+    localStorage.setItem('techymindPrivacyEnabled', privEnabled ? '1' : '0');
     localStorage.setItem('opencometPrivacyEnabled', privEnabled ? '1' : '0');
     const privConfig = {
       blurFaces: $('blurFacesToggle')?.checked !== false,
@@ -547,6 +652,7 @@ async function saveSettings() {
       redactTextPii: true,
       maskIndianId: $('indianPiiToggle')?.checked !== false,
     };
+    localStorage.setItem('techymindPrivacyConfig', JSON.stringify(privConfig));
     localStorage.setItem('opencometPrivacyConfig', JSON.stringify(privConfig));
   } catch {}
 
@@ -559,12 +665,28 @@ async function saveSettings() {
 }
 
 // Event Listeners
+$('grantMicBtn')?.addEventListener('click', requestMicPermission);
 $('testOllamaBtn')?.addEventListener('click', checkOllamaStatus);
+$('testMlxBtn')?.addEventListener('click', checkMlxStatus);
 $('refreshOllamaModelsBtn')?.addEventListener('click', async () => {
   await checkOllamaStatus();
   await refreshOllamaModels();
 });
 $('saveAllSettingsBtn')?.addEventListener('click', saveSettings);
+
+// SIH Evaluation & Live Demo Lab launchers
+$('launchGovFormBtn')?.addEventListener('click', () => {
+  chrome.tabs.create({ url: chrome.runtime.getURL('TechyMindBench/pages/gov-form.html') });
+});
+$('launchRedactionLabBtn')?.addEventListener('click', () => {
+  chrome.tabs.create({ url: chrome.runtime.getURL('TechyMindBench/pages/redaction-lab.html') });
+});
+$('launchCheckoutDemoBtn')?.addEventListener('click', () => {
+  chrome.tabs.create({ url: chrome.runtime.getURL('TechyMindBench/pages/checkout.html') });
+});
+$('launchDashboardBtn')?.addEventListener('click', () => {
+  chrome.tabs.create({ url: chrome.runtime.getURL('TechyMindBench/dashboard.html') });
+});
 
 // Backup / Import
 $('exportConfigBtn')?.addEventListener('click', () => {

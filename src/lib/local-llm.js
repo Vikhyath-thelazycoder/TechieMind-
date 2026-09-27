@@ -234,3 +234,77 @@ export async function callLocalAIRaw(settings, prompt, options = {}) {
   if (metrics) mlLog(`on-device metrics · ${metrics.generatedTokens} tok · ${metrics.tokensPerSecond} tok/s`);
   return text;
 }
+
+/**
+ * Probes the local Laya MLX Metal daemon (http://127.0.0.1:8181/decide).
+ * Runs single-pass non-autoregressive candidate ranking on Apple Silicon in 2-10ms.
+ * Fail-soft: returns null if daemon is offline or timed out (> 35ms).
+ */
+export async function probeLayaMlxFastPath(task, candidates = [], timeoutMs = 150, baseUrl = 'http://127.0.0.1:8181') {
+  if (!Array.isArray(candidates) || !candidates.length) return null;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const cleanUrl = (baseUrl || 'http://127.0.0.1:8181').trim().replace(/\/+$/, '');
+  try {
+    const res = await fetch(`${cleanUrl}/decide`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task, candidates }),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Evaluates DOM state verification via Laya MLX in ~6ms.
+ */
+export async function verifyViaLayaMlx(action, preHash, postHash, targetSelector = '', timeoutMs = 25, baseUrl = 'http://127.0.0.1:8181') {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const cleanUrl = (baseUrl || 'http://127.0.0.1:8181').trim().replace(/\/+$/, '');
+  try {
+    const res = await fetch(`${cleanUrl}/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action,
+        pre_dom_hash: preHash,
+        post_dom_hash: postHash,
+        target_selector: targetSelector,
+      }),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Health-check for Laya MLX Metal daemon on Apple Silicon.
+ */
+export async function checkLayaMlxHealth(timeoutMs = 1500, baseUrl = 'http://127.0.0.1:8181') {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const cleanUrl = (baseUrl || 'http://127.0.0.1:8181').trim().replace(/\/+$/, '');
+  try {
+    const res = await fetch(`${cleanUrl}/health`, { signal: ctrl.signal });
+    if (!res.ok) return { online: false };
+    const data = await res.json();
+    return { online: true, ...data };
+  } catch {
+    return { online: false };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+

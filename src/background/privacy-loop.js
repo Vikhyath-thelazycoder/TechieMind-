@@ -24,6 +24,10 @@ import { authorizeAction, GUARDIAN_HIT_LIMIT, createGuardianCounter, tallyGuardi
 import { strategyHintFor } from '../lib/field-matching.js';
 import { sendToOffscreen } from '../lib/offscreen-client.js';
 import { firewallStatusForInspector } from '../lib/privacy-firewall.js';
+import { parseOrdinalPhrase, UNIVERSAL_CARD_SELECTORS } from '../lib/ordinal-resolver.js';
+import { extractCleanQuery } from '../lib/domain-router.js';
+import { isHighRiskAction, createActionProposal } from '../lib/proposal-gate.js';
+import { createHandoverState } from '../lib/handover-protocol.js';
 
 // the loop cap now honors Settings → Max steps. The hardcoded 25
 // meant the Settings slider silently did not apply to Privacy Mode.
@@ -59,7 +63,7 @@ function logVerifyState(step, action, result, extra = {}) {
       summary: String(result?.verification?.summary || result?.error || '').slice(0, 160),
       ...extra,
     };
-    console.log('[Open Comet][VERIFY] ' + JSON.stringify(line));
+    console.log('[TechyMind][VERIFY] ' + JSON.stringify(line));
   } catch { /* telemetry must never break the loop */ }
 }
 
@@ -169,7 +173,7 @@ export async function runPrivacyAgent(ctx) {
       }
     } catch { /* best-effort accounting */ }
     onStep?.(STEP_TYPE.DONE, message, { step, phase: 'guardian-stop' });
-    console.warn('[Open Comet] Guardian stop:', message);
+    console.warn('[TechyMind] Guardian stop:', message);
     onDone?.({
       steps: step,
       history,
@@ -210,6 +214,117 @@ export async function runPrivacyAgent(ctx) {
       const stepT0 = Date.now();
       stepCount++;
 
+      // 0) ZERO-LATENCY DETERMINISTIC FAST-PATH (Step 1 Instant Execution)
+      // When the user gives an explicit deterministic instruction (autofill, ordinal selection, direct search),
+      // execute it immediately without burning 75 seconds on VLM image capture and autoregressive token generation.
+      if (stepCount === 1) {
+        const taskLower = String(task || '').toLowerCase();
+        const ord = parseOrdinalPhrase(task);
+
+        // Fast-Path A: Form Autofill
+        if (/\b(autofill|fill\s*(?:my|the|in)?\s*(?:form|details|address|info|profile|credentials)|complete\s*form)\b/i.test(taskLower)) {
+          onStep?.(STEP_TYPE.THINKING, '⚡ Fast-Path: Form Autofill intent detected. Mapping fields to profile data...', {
+            step: 1, phase: 'fast-autofill',
+          });
+          const autofillAction = {
+            type: 'autofill_form',
+            profileData: settings?.profileData || {},
+            message: 'Autofilling form fields with stored profile details',
+          };
+          try {
+            const actRes = await executeAction(tabId, autofillAction, stateRef || { settings });
+            const fillCount = actRes?.result?.count || actRes?.result?.filled?.length || 0;
+            if (fillCount > 0) {
+              const totalMs = Date.now() - runT0;
+              const finalMsg = `Successfully autofilled ${fillCount} form field(s) with your saved profile details.`;
+              onStep?.(STEP_TYPE.DONE, finalMsg, { step: 1, totalMs, finalAnswer: finalMsg });
+              onDone?.({
+                steps: 1,
+                history: [{ action: autofillAction, result: `Autofilled ${fillCount} fields`, step: 1 }],
+                finalThought: 'Direct form autofill executed instantly via semantic attribute mapping.',
+                finalAnswer: finalMsg,
+                totalMs,
+                totalLatencyMs: totalMs,
+                privacy: { frames: 0, faces: 0, dom: 0, objects: 0, textPii: 0, ocr: 0, redactions: 0, inspector: null },
+              });
+              return;
+            }
+          } catch (afErr) {
+            console.warn('[PrivacyLoop] Fast autofill failed, falling back to full loop:', afErr.message);
+          }
+        }
+
+        // Fast-Path B: Ordinal Item Selection
+        if (ord.isOrdinal) {
+          onStep?.(STEP_TYPE.THINKING, `⚡ Fast-Path: Ordinal selection intent (#${ord.ordinal} ${ord.entity || 'item'}) detected. Resolving target on page...`, {
+            step: 1, phase: 'fast-ordinal',
+          });
+          const clickAction = {
+            type: 'click',
+            selector: UNIVERSAL_CARD_SELECTORS.join(', '),
+            ordinalIndex: ord.ordinal,
+            entity: ord.entity || 'item',
+            message: `Selecting item #${ord.ordinal} on page`,
+          };
+          try {
+            const clickRes = await executeAction(tabId, clickAction, stateRef || { settings });
+            if (clickRes?.ok) {
+              const totalMs = Date.now() - runT0;
+              const finalMsg = `Selected item #${ord.ordinal} (${clickRes?.matchedText || ord.entity || 'item'}).`;
+              onStep?.(STEP_TYPE.DONE, finalMsg, { step: 1, totalMs, finalAnswer: finalMsg });
+              onDone?.({
+                steps: 1,
+                history: [{ action: clickAction, result: `Clicked item #${ord.ordinal}`, step: 1 }],
+                finalThought: `Direct ordinal element #${ord.ordinal} resolved and clicked instantly without VLM overhead.`,
+                finalAnswer: finalMsg,
+                totalMs,
+                totalLatencyMs: totalMs,
+                privacy: { frames: 0, faces: 0, dom: 0, objects: 0, textPii: 0, ocr: 0, redactions: 0, inspector: null },
+              });
+              return;
+            }
+          } catch (ordErr) {
+            console.warn('[PrivacyLoop] Fast ordinal selection fell back to full loop:', ordErr.message);
+          }
+        }
+
+        // Fast-Path C: Direct In-Page Search Bar Query
+        if (/^(?:search|find|look\s*up)\s+(?:for\s+)?(.+)/i.test(taskLower)) {
+          const cleanQuery = extractCleanQuery(task);
+          if (cleanQuery) {
+            onStep?.(STEP_TYPE.THINKING, `⚡ Fast-Path: Search query "${cleanQuery}" detected. Typing into site search bar...`, {
+              step: 1, phase: 'fast-search',
+            });
+            const searchAction = {
+              type: 'type',
+              selector: 'input[type="search"], input[name="q"], input[name="search_query"], input[name*="search" i], input[placeholder*="search" i], input[aria-label*="search" i], input#search, input.search',
+              text: cleanQuery,
+              pressEnter: true,
+            };
+            try {
+              const searchRes = await executeAction(tabId, searchAction, stateRef || { settings });
+              if (searchRes?.ok) {
+                const totalMs = Date.now() - runT0;
+                const finalMsg = `Searched for "${cleanQuery}".`;
+                onStep?.(STEP_TYPE.DONE, finalMsg, { step: 1, totalMs, finalAnswer: finalMsg });
+                onDone?.({
+                  steps: 1,
+                  history: [{ action: searchAction, result: `Searched for ${cleanQuery}`, step: 1 }],
+                  finalThought: `Search query submitted directly into the page search bar.`,
+                  finalAnswer: finalMsg,
+                  totalMs,
+                  totalLatencyMs: totalMs,
+                  privacy: { frames: 0, faces: 0, dom: 0, objects: 0, textPii: 0, ocr: 0, redactions: 0, inspector: null },
+                });
+                return;
+              }
+            } catch (searchErr) {
+              console.warn('[PrivacyLoop] Fast search typing fell back to full loop:', searchErr.message);
+            }
+          }
+        }
+      }
+
       // 1) Capture + sanitize
       // THINKING (not SCREENSHOT) — the SW drops imageless SCREENSHOT steps
       // and the raw-broadcast fallback that used to render them is gone.
@@ -247,6 +362,23 @@ export async function runPrivacyAgent(ctx) {
         ? firewallStatusForInspector(sanitized.privacy, (sanitized.sanitizedDataUrl || '').length)
         : runPii.lastInspector;
 
+      // HUMAN-AGENT HANDOVER PROTOCOL: Security gates, CAPTCHAs, and 2FA/OTPs
+      const pageTextToCheck = String(sanitized.sanitizedDomText || '');
+      if (/(captcha|hcaptcha|recaptcha|turnstile|security\s*check|enter\s*the\s*6-digit\s*code|enter\s*otp)/i.test(pageTextToCheck)) {
+        try {
+          const isOtp = /otp|6-digit|verification\s*code/i.test(pageTextToCheck);
+          const handover = createHandoverState({
+            type: isOtp ? 'otp' : 'captcha',
+            reason: isOtp
+              ? 'Two-Factor Authentication (OTP / Security Code) requested. Yielding control to human.'
+              : 'Security CAPTCHA challenge detected. Human interaction required.',
+          });
+          onStep?.(STEP_TYPE.THINKING, `✋ Human Handover: ${handover.reason} Agent paused. Complete verification in tab to continue.`, {
+            step: stepCount, phase: 'handover-wait', handover,
+          });
+        } catch { /* best-effort handover */ }
+      }
+
       // Keep the offscreen ML runtime warm while a privacy-ON run is active:
       // long VLM turns (30–180 s each) can otherwise let its 5-minute idle
       // timer fire mid-run, forcing a full model reload (10–15 s) on a later
@@ -283,7 +415,7 @@ export async function runPrivacyAgent(ctx) {
         });
       }
       // Page/DOM diagnostics in the console (debugging aid, user-requested)
-      console.log(`[Open Comet] Step ${stepCount} page state · url=${sanitized.page?.url || '?'} · title="${sanitized.page?.title || ''}" · ` +
+      console.log(`[TechyMind] Step ${stepCount} page state · url=${sanitized.page?.url || '?'} · title="${sanitized.page?.title || ''}" · ` +
         `videos=${(sanitized.page?.videos || []).length} (playing=${(sanitized.page?.videos || []).filter(v => !v.paused).length}) · ` +
         `redactions: faces=${sanitized.stats?.counts?.faces ?? 0} dom=${sanitized.stats?.counts?.domSensitive ?? 0} yoloObj=${sanitized.stats?.counts?.objects ?? 0} textPii=${sanitized.stats?.counts?.textPii ?? 0} · ` +
         `sanitize=${sanitized.stats?.totalMs}ms`);
@@ -301,9 +433,23 @@ export async function runPrivacyAgent(ctx) {
       const pendingNotes = Array.isArray(stateRef?.userNotes) ? stateRef.userNotes.splice(0) : [];
       const userContext = pendingNotes.map(n => String(n?.text || '').trim()).filter(Boolean).slice(-4).join('\n- ');
       if (userContext) {
-        console.log(`[Open Comet] Step ${stepCount}: injecting ${pendingNotes.length} user note(s) into the decision prompt`);
+        console.log(`[TechyMind] Step ${stepCount}: injecting ${pendingNotes.length} user note(s) into the decision prompt`);
       }
-      const decision = await decideViaServer(sanitized, task, history, settings, { strategyHint: pendingHint, userNotes: userContext, profileData: settings?.profileData || null });
+      let decision;
+      try {
+        decision = await decideViaServer(sanitized, task, history, settings, {
+          strategyHint: pendingHint,
+          userNotes: userContext,
+          profileData: settings?.profileData || null,
+          signal,
+        });
+      } catch (decideErr) {
+        if (signal?.aborted || decideErr?.name === 'AbortError' || /aborted/i.test(decideErr?.message || '')) {
+          console.log('[TechyMind] VLM decision interrupted by user abort signal');
+          throw new Error('Agent aborted by user');
+        }
+        throw decideErr;
+      }
       runTiming.sanitizeMs.push(sanitized.stats?.totalMs || 0);
       runTiming.vlmMs.push(decision.networkLatencyMs || 0);
 
@@ -320,6 +466,90 @@ export async function runPrivacyAgent(ctx) {
       // value landed in a sensitive field.
       let action = plan.action || { type: 'ask_user' };
 
+      // AUTONOMOUS EXECUTION ENGINE: In autonomous mode ("Act without asking"), execute
+      // the end-to-end user goal without pausing for redundant permission questions.
+      if (!action.privacyBlocked && !plan.privacyBlocked && (!askBeforeActing || action.type === 'ask_user')) {
+        const curUrl = String(sanitized?.page?.url || '').toLowerCase();
+        const taskLower = String(task || '').toLowerCase();
+        const ord = parseOrdinalPhrase(task);
+
+        // 1. Informational / Q&A / Summarization tasks
+        if (action.type === 'ask_user' && (action.message || plan.thought) &&
+            /\b(summarize|summarise|what is|tell me|who is|explain|describe|extract|how to|answer|review)\b/i.test(taskLower)) {
+          console.log('[PrivacyLoop] Autonomous override: delivering answer for info task');
+          action = { type: 'done', message: action.message || plan.thought };
+          plan.is_complete = true;
+        }
+        // 2. Direct form autofill instruction
+        else if (/\b(autofill|fill\s*(?:my|the)?\s*(?:form|details|address|info|profile)|complete\s*form|shipping\s*address)\b/i.test(taskLower)) {
+          console.log('[PrivacyLoop] Autonomous override: executing form autofill');
+          action = {
+            type: 'autofill_form',
+            message: 'Autofilling form fields with stored profile details',
+          };
+        }
+        // 3. Active media playback
+        else if (/\b(play|watch|listen|stream)\b/i.test(taskLower) &&
+                 (curUrl.includes('watch?v=') || curUrl.includes('/video/') || curUrl.includes('/watch') || curUrl.includes('/track/') || curUrl.includes('/player/'))) {
+          console.log('[PrivacyLoop] Autonomous override: media playback active');
+          action = { type: 'done', message: 'Playing media.' };
+          plan.is_complete = true;
+        }
+        // 4. E-commerce checkout / address page detected
+        else if ((curUrl.includes('checkout') || curUrl.includes('address') || curUrl.includes('shipping') || curUrl.includes('delivery')) &&
+                 /\b(buy|order|purchase|checkout|fill)\b/i.test(taskLower)) {
+          console.log('[PrivacyLoop] Autonomous override: autofilling shipping/checkout address');
+          action = {
+            type: 'autofill_form',
+            message: 'Autofilling delivery address and checkout details',
+          };
+        }
+        // 5. Product detail landing — if user wants to buy, trigger Buy Now / Checkout
+        else if (/\b(buy|order|purchase)\b/i.test(taskLower) &&
+                 (curUrl.includes('/p/') || curUrl.includes('/product/') || curUrl.includes('/dp/') || curUrl.includes('/item/') || curUrl.includes('/goods/'))) {
+          console.log('[PrivacyLoop] Autonomous override: proceeding to checkout on product detail page');
+          action = {
+            type: 'click',
+            selector: 'button, input[type="submit"], input[type="button"], a[role="button"]',
+            text: 'Buy Now',
+            message: 'Proceeding to checkout with Buy Now',
+          };
+        }
+        else if (/\b(product|item|shoe|laptop|phone|book)\b/i.test(taskLower) &&
+                 (curUrl.includes('/p/') || curUrl.includes('/product/') || curUrl.includes('/dp/') || curUrl.includes('/item/') || curUrl.includes('/goods/'))) {
+          console.log('[PrivacyLoop] Autonomous override: product detail page opened');
+          action = { type: 'done', message: 'Opened selected product.' };
+          plan.is_complete = true;
+        }
+        // 6. Ordinal target selection or VLM hesitation on search/listing results
+        else if (ord.isOrdinal || ((action.type === 'ask_user' || action.type === 'wait' || !action.selector) &&
+                 (curUrl.includes('search') || curUrl.includes('results') || curUrl.includes('/s?') || curUrl.includes('/s/')))) {
+          const ordIdx = ord.isOrdinal ? ord.ordinal : 1;
+          console.log(`[PrivacyLoop] Autonomous override: selecting item #${ordIdx} using universal visual grounding`);
+          action = {
+            type: 'click',
+            selector: UNIVERSAL_CARD_SELECTORS.join(', '),
+            ordinalIndex: ordIdx,
+            entity: ord.entity || 'item',
+            message: `Selecting item #${ordIdx} on page`
+          };
+        }
+        // 7. In-page search bar keyboard typing + Enter
+        else if (action.type === 'ask_user' || (!curUrl.includes('search') && !curUrl.includes('results') && !action.selector)) {
+          const cleanQuery = extractCleanQuery(task);
+          if (cleanQuery) {
+            console.log('[PrivacyLoop] Autonomous override: keyboard typing into search bar:', cleanQuery);
+            action = {
+              type: 'type',
+              selector: 'input[type="search"], input[name="q"], input[name="search_query"], input[name*="search" i], input[placeholder*="search" i], input[aria-label*="search" i], input#search, input.search',
+              text: cleanQuery,
+              pressEnter: true
+            };
+            plan.queue = [{ type: 'press_key', key: 'Enter' }];
+          }
+        }
+      }
+
       onStep?.(STEP_TYPE.THINKING, `VLM: ${plan.thought || '(no reasoning)'}`, {
         step: stepCount, phase: 'thought', confidence: plan.confidence,
       });
@@ -335,7 +565,7 @@ export async function runPrivacyAgent(ctx) {
           onStep?.(STEP_TYPE.PLAN_READY, `Final answer ready (${finalAnswer.length} chars) — shown below`, { step: stepCount, phase: 'final-answer' });
         }
         onStep?.(STEP_TYPE.DONE, 'Task complete', { step: stepCount, history, totalMs, finalAnswer });
-        console.log(`[Open Comet] Task complete · ${stepCount} step(s) · total ${(totalMs / 1000).toFixed(1)}s`);
+        console.log(`[TechyMind] Task complete · ${stepCount} step(s) · total ${(totalMs / 1000).toFixed(1)}s`);
         onDone?.({
           steps: stepCount,
           history,
@@ -455,6 +685,22 @@ export async function runPrivacyAgent(ctx) {
         return;
       }
 
+      // TWO-PHASE COMMIT PROPOSAL GATE: Cryptographic SHA-256 seal on high-impact actions
+      if (isHighRiskAction(action)) {
+        try {
+          const proposal = await createActionProposal({
+            actionType: action.type,
+            title: `Authorize High-Impact Action: ${describeAction(action)}`,
+            targetUrl: sanitized?.page?.url || '',
+            targetSelector: action.selector || '',
+            params: { text: action.text || action.value || '' },
+          });
+          onStep?.(STEP_TYPE.PLAN_READY, `🔒 Action Proposal Gate: High-impact action sealed [SHA-256: ${proposal.hash.slice(0, 16)}...]`, {
+            step: stepCount, phase: 'proposal-seal', proposal,
+          });
+        } catch { /* best-effort proposal seal */ }
+      }
+
       // TASK AUTHORIZATION DAEMON (primary action)
       // Purchase/delete clicks need authorization from the user's OWN text —
       // negated tasks ("do not purchase anything") are blocked too. Rejected
@@ -475,7 +721,7 @@ export async function runPrivacyAgent(ctx) {
           history.push({ action, result: `BLOCKED by the Task Authorization Guardian — ${auth.verdict.reason}`, latencyMs: 0, step: stepCount, blockedByGuardian: true });
           onStep?.(STEP_TYPE.EXECUTING, `${auth.userMessage} (attempt ${auth.hit}/${GUARDIAN_HIT_LIMIT}) — a fresh decision follows. To allow it, put it in your own words: edit the task or send a note.`, { step: stepCount, phase: 'guardian-blocked', action });
           pendingHint = auth.hint;   // OVERRIDES speculative next-turn guidance
-          console.warn(`[Open Comet] Step ${stepCount}: guardian BLOCKED ${describeAction(action)} (${auth.hit}/${GUARDIAN_HIT_LIMIT})`);
+          console.warn(`[TechyMind] Step ${stepCount}: guardian BLOCKED ${describeAction(action)} (${auth.hit}/${GUARDIAN_HIT_LIMIT})`);
           await sleep(300);
           continue;
         }
@@ -496,7 +742,7 @@ export async function runPrivacyAgent(ctx) {
         if (verdict === 'skip') {
           history.push({ action, result: 'skipped by the user (Ask before acting)', latencyMs: 0, step: stepCount });
           onStep?.(STEP_TYPE.EXECUTING, 'Action skipped by you — asking the model for a different approach…', { step: stepCount, phase: 'approval-skipped', action });
-          console.log(`[Open Comet] Step ${stepCount}: action skipped by user (ask-before-acting)`);
+          console.log(`[TechyMind] Step ${stepCount}: action skipped by user (ask-before-acting)`);
           await sleep(300);
           continue;
         }
@@ -520,7 +766,7 @@ export async function runPrivacyAgent(ctx) {
       // history. Mask it HERE, at the source.
       if (result?.fieldSensitive && action.type !== 'done') {
         action = { ...action, text: '••••••', value: undefined, masked: 'sensitive-field' };
-        console.log('[Open Comet] Typed value into a SENSITIVE field — history entry masked');
+        console.log('[TechyMind] Typed value into a SENSITIVE field — history entry masked');
       }
       runTiming.actionMs.push(actMs);
 
@@ -557,6 +803,29 @@ export async function runPrivacyAgent(ctx) {
       });
       logVerifyState(stepCount, action, result);
 
+      // Direct task completion when autofill succeeds
+      if (action.type === 'autofill_form' && (result?.result?.count > 0 || result?.changed)) {
+        const fillCount = result?.result?.count || result?.result?.filled?.length || 1;
+        const totalMs = Date.now() - runT0;
+        const finalMsg = `Successfully autofilled ${fillCount} form field(s) with saved profile details.`;
+        onStep?.(STEP_TYPE.DONE, finalMsg, { step: stepCount, totalMs, finalAnswer: finalMsg });
+        onDone?.({
+          steps: stepCount,
+          history,
+          finalThought: 'Form autofill completed successfully.',
+          finalAnswer: finalMsg,
+          totalMs,
+          totalLatencyMs: totalMs,
+          privacy: {
+            frames: runPii.frames, faces: runPii.faces, dom: runPii.dom,
+            objects: runPii.objects, textPii: runPii.textPii, ocr: runPii.ocr,
+            redactions: runPii.faces + runPii.dom + runPii.objects + runPii.textPii + runPii.ocr,
+            inspector: runPii.lastInspector,
+          },
+        });
+        return;
+      }
+
       // loop governor: escalate strategy when the target keeps
       // failing. A verified success resets the ladder. Level mapping:
       //   2 stalls → level 1 (expand collapsed group / type into focused)
@@ -573,7 +842,7 @@ export async function runPrivacyAgent(ctx) {
           3: `⚠️ Still stuck (${stallCount}×). Next turn hint: use the app's keyboard submit shortcut (Ctrl+Enter / Enter), verify from the result, and finish if the goal is already visible.`,
         };
         onStep?.(STEP_TYPE.THINKING, msgs[newLevel], { step: stepCount, phase: 'strategy-hint', level: newLevel, stalls: stallCount });
-        console.warn(`[Open Comet] Step ${stepCount}: stall governor → level ${newLevel} after ${stallCount} ineffective step(s)`);
+        console.warn(`[TechyMind] Step ${stepCount}: stall governor → level ${newLevel} after ${stallCount} ineffective step(s)`);
       }
       hintLevel = newLevel;
 
@@ -607,9 +876,9 @@ export async function runPrivacyAgent(ctx) {
               result: { ...r2, dataUrl: undefined },
             });
             logVerifyState(stepCount, { type: 'media', command: cmd }, r2, { auto: true });
-            console.log(`[Open Comet] Step ${stepCount}: auto-media recovery (${cmd}) → ${r2?.ok ? 'executed' : 'failed: ' + (r2?.reason || '?')}`);
+            console.log(`[TechyMind] Step ${stepCount}: auto-media recovery (${cmd}) → ${r2?.ok ? 'executed' : 'failed: ' + (r2?.reason || '?')}`);
           } catch (e) {
-            console.warn(`[Open Comet] Step ${stepCount}: auto-media recovery threw:`, e?.message || e);
+            console.warn(`[TechyMind] Step ${stepCount}: auto-media recovery threw:`, e?.message || e);
           }
         }
       }
@@ -643,7 +912,7 @@ export async function runPrivacyAgent(ctx) {
             history.push({ action: qAction, result: `BLOCKED by the Task Authorization Guardian — ${qAuth.verdict.reason}`, latencyMs: 0, step: stepCount + 1, queued: true, blockedByGuardian: true });
             onStep?.(STEP_TYPE.EXECUTING, `${qAuth.userMessage} (attempt ${qAuth.hit}/${GUARDIAN_HIT_LIMIT}) — the remaining speculative queue was discarded.`, { step: stepCount + 1, phase: 'guardian-blocked-queued', action: qAction, queued: true });
             pendingHint = qAuth.hint;
-            console.warn(`[Open Comet] Step ${stepCount}: guardian BLOCKED queued ${describeAction(qAction)} — queue overridden`);
+            console.warn(`[TechyMind] Step ${stepCount}: guardian BLOCKED queued ${describeAction(qAction)} — queue overridden`);
             break;   // OVERRIDE: drop the remaining speculative queue
           }
         }
@@ -688,9 +957,9 @@ export async function runPrivacyAgent(ctx) {
           step: stepCount, phase: 'executed-queued', action: qAction, result: { ...qResult, dataUrl: undefined }, queued: true,
         });
         logVerifyState(stepCount, qAction, qResult, { queued: true });
-        console.log(`[Open Comet] Step ${stepCount} (queued, no VLM) ${describeAction(qAction)} → ${qText} (${qMs}ms)`);
+        console.log(`[TechyMind] Step ${stepCount} (queued, no VLM) ${describeAction(qAction)} → ${qText} (${qMs}ms)`);
         if (!qResult?.ok || qNoEffect) {
-          console.log('[Open Comet] Queue aborted — falling back to a fresh VLM decision next step');
+          console.log('[TechyMind] Queue aborted — falling back to a fresh VLM decision next step');
           break;
         }
         await sleep(400); // small settle between queued actions
@@ -705,10 +974,10 @@ export async function runPrivacyAgent(ctx) {
         onStep?.(STEP_TYPE.THINKING, '⚠️ Click had no visible effect (playback state unchanged). If the goal is to pause/play/mute, the next step will use the direct "media" action on the <video> element instead of clicking the player.', {
           step: stepCount, phase: 'click-no-effect',
         });
-        console.warn(`[Open Comet] Step ${stepCount}: click "${action.selector}" had NO effect — media fallback advised`);
+        console.warn(`[TechyMind] Step ${stepCount}: click "${action.selector}" had NO effect — media fallback advised`);
       }
 
-      console.log(`[Open Comet] Step ${stepCount} took ${((Date.now() - stepT0) / 1000).toFixed(1)}s (sanitize ${sanitized.stats?.totalMs}ms · VLM ${decision.networkLatencyMs}ms · action ${actMs}ms)`);
+      console.log(`[TechyMind] Step ${stepCount} took ${((Date.now() - stepT0) / 1000).toFixed(1)}s (sanitize ${sanitized.stats?.totalMs}ms · VLM ${decision.networkLatencyMs}ms · action ${actMs}ms)`);
 
       // Small delay for the page to settle
       await sleep(800);

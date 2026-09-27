@@ -44,10 +44,12 @@ import { ensureOffscreen, sendToOffscreen, warmupVisionModels } from '../lib/off
 import { detectSkillsForTask } from '../lib/skill-matcher.js';
 import { getAllSkills } from '../lib/skills.js';
 import { loadLibrarySkills } from '../lib/skill-library.js';
+import { parseOrdinalPhrase } from '../lib/ordinal-resolver.js';
+import { inferStartUrlFromTask, detectCrossDomainSwitch, PRIVILEGED_URL_RE as PRIVILEGED_URL_RE_SW } from '../lib/domain-router.js';
 import { createLogger, installGlobalErrorTraps } from '../core/logger.js';
 
 // Diagnostics loggers
-// Every context logs with a [Open Comet:<ns>] tag. warn/error lines also reach
+// Every context logs with a [TechyMind:<ns>] tag. warn/error lines also reach
 // the sidepanel console through the DIAG_LOG relay, so ONE DevTools window
 // shows downloads, API errors, model-request errors, limits and busy states.
 const logSW     = createLogger('SW',      { relayType: 'DIAG_LOG', relayLevel: 'warn' });
@@ -81,28 +83,108 @@ function trackUsage(usage) {
   recordTokenUsage(model, promptTokens, completionTokens, totalTokens, cost).catch(() => {});
 }
 
+// DeclarativeNetRequest dynamic rules: Rewrite Origin to http://localhost:11434
+// to prevent Ollama from rejecting Chrome extension requests with HTTP 403 Forbidden.
+const OLLAMA_DNR_RULES = [
+  {
+    id: 11434,
+    priority: 1,
+    action: {
+      type: 'modifyHeaders',
+      requestHeaders: [
+        { header: 'Origin', operation: 'set', value: 'http://localhost:11434' },
+      ],
+    },
+    condition: {
+      urlFilter: ':11434/',
+      resourceTypes: ['xmlhttprequest', 'other'],
+    },
+  },
+  {
+    id: 11435,
+    priority: 1,
+    action: {
+      type: 'modifyHeaders',
+      requestHeaders: [
+        { header: 'Origin', operation: 'set', value: 'http://localhost:11434' },
+      ],
+    },
+    condition: {
+      urlFilter: '||localhost:11434/',
+      resourceTypes: ['xmlhttprequest', 'other'],
+    },
+  },
+  {
+    id: 11436,
+    priority: 1,
+    action: {
+      type: 'modifyHeaders',
+      requestHeaders: [
+        { header: 'Origin', operation: 'set', value: 'http://localhost:11434' },
+      ],
+    },
+    condition: {
+      urlFilter: '||127.0.0.1:11434/',
+      resourceTypes: ['xmlhttprequest', 'other'],
+    },
+  },
+];
+
+async function setupOllamaOriginRules() {
+  if (typeof chrome === 'undefined' || !chrome.declarativeNetRequest?.updateDynamicRules) return;
+  try {
+    const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
+    const existingIds = existingRules.map(r => r.id);
+    const ruleIdsToRemove = [11434, 11435, 11436].filter(id => existingIds.includes(id));
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: ruleIdsToRemove,
+      addRules: OLLAMA_DNR_RULES,
+    });
+    console.log('[TechyMind] DeclarativeNetRequest dynamic rules active for Ollama Origin.');
+  } catch (err) {
+    console.warn('[TechyMind] Could not install DeclarativeNetRequest rules for Ollama:', err?.message || err);
+  }
+}
+setupOllamaOriginRules();
+
 // Lifecycle
 chrome.runtime.onInstalled.addListener(async () => {
   await initStorage();
-  // Firefox has no chrome.sidePanel — the toolbar button falls back
-  // to opening the panel as a regular tab (see the onClicked listener below).
-  chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: true });
+  await setupOllamaOriginRules();
+  try {
+    chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: true });
+  } catch (_) {}
 });
 
-chrome.action.onClicked.addListener(tab => {
-  if (chrome.sidePanel?.open) {
-    chrome.sidePanel.open({ tabId: tab.id });
-    return;
+// Top-level sidepanel behavior registration
+try {
+  chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: true });
+} catch (_) {}
+
+chrome.runtime.onStartup?.addListener?.(async () => {
+  await setupOllamaOriginRules();
+  try {
+    chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: true });
+  } catch (_) {}
+});
+
+chrome.action.onClicked.addListener(async tab => {
+  if (chrome.sidePanel?.open && tab?.windowId) {
+    try {
+      await chrome.sidePanel.open({ windowId: tab.windowId });
+      return;
+    } catch (err) {
+      console.warn('[TechyMind] sidePanel.open failed, opening as tab:', err?.message || err);
+    }
   }
-  // FIREFOX: the sidebar opens as a tab — same sidepanel.html, same
-  // module UI, no sidePanel API required.
+  // Fallback: open sidepanel.html as a full tab
   try {
     chrome.tabs.create({
       url: chrome.runtime.getURL('src/sidepanel/sidepanel.html'),
       index: Number.isInteger(tab?.index) ? tab.index + 1 : undefined,
     });
   } catch (err) {
-    console.error('[Open Comet] Could not open the panel as a tab:', err?.message || err);
+    console.error('[TechyMind] Could not open the panel as a tab:', err?.message || err);
   }
 });
 
@@ -135,13 +217,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
   if (msg && msg.type === 'OFFSCREEN_CLOSE_REQUEST') {
     if (chrome.offscreen?.closeDocument) {
       chrome.offscreen.closeDocument().then(
-        () => console.log('[Open Comet] Offscreen ML runtime closed (idle).'),
+        () => console.log('[TechyMind] Offscreen ML runtime closed (idle).'),
         () => {}
       );
     } else if (typeof document !== 'undefined') {
       // FIREFOX in-page mode: teardown = removing the hidden iframe.
+      document.getElementById('techymind-ml-frame')?.remove();
       document.getElementById('opencomet-ml-frame')?.remove();
-      console.log('[Open Comet] In-page ML runtime closed (idle).');
+      console.log('[TechyMind] In-page ML runtime closed (idle).');
     }
     return;
   }
@@ -232,14 +315,14 @@ chrome.alarms?.onAlarm.addListener(alarm => {
   // wakes it. agentState is fresh after a wake — the boot reconciliation at
   // the bottom of this file finalizes the interrupted run; here we only
   // touch the runtime API so a STILL-ALIVE run gets its idle timer reset.
-  if (alarm?.name === 'opencomet_run_keepalive') {
+  if (alarm?.name === 'techymind_run_keepalive' || alarm?.name === 'opencomet_run_keepalive') {
     if (agentState.running) {
       try { chrome.runtime.getPlatformInfo(() => {}); } catch { /* noop */ }
     }
     return;
   }
-  if (!alarm?.name?.startsWith('opencomet_monitor_')) return;
-  const id = alarm.name.replace('opencomet_monitor_', '');
+  if (!alarm?.name?.startsWith('techymind_monitor_') && !alarm?.name?.startsWith('opencomet_monitor_')) return;
+  const id = alarm.name.replace(/^techymind_monitor_|^opencomet_monitor_/, '');
   (async () => {
     try {
       const monitors = await getMonitors();
@@ -255,7 +338,7 @@ chrome.alarms?.onAlarm.addListener(alarm => {
         chrome.notifications.create({
           type: 'basic',
           iconUrl: chrome.runtime.getURL('assets/icons/icon128.png'),
-          title: 'Open Comet — page monitor',
+          title: 'TechyMind — page monitor',
           message: `${label}\n${monitor.url}`,
         });
         // the parallel MONITOR_ALERT broadcast was removed — it had no
@@ -267,7 +350,7 @@ chrome.alarms?.onAlarm.addListener(alarm => {
       monitors.set(id, monitor);
       await saveMonitors(monitors);
     } catch (err) {
-      console.warn('[Open Comet] Monitor check failed:', err.message);
+      console.warn('[TechyMind] Monitor check failed:', err.message);
     }
   })();
 });
@@ -334,6 +417,112 @@ async function handleGetOllamaModels(msg, respond) {
 }
 
 
+function isSummarizeIntent(task) {
+  const t = String(task || '').toLowerCase();
+  return /\b(summarize|summarise|summary|tldr)\b/i.test(t) && /\b(page|site|webpage|tab|article|screen)\b/i.test(t);
+}
+
+function isConversationalTask(task) {
+  const t = String(task || '').trim().toLowerCase();
+  if (!t) return false;
+
+  // 1. Explicit domain / URL mentions -> browser task
+  if (/https?:\/\/|(?:www\.)?[a-z0-9-]+\.(?:com|org|net|in|io|co|ai|dev|gov|edu)/i.test(t)) return false;
+
+  // 2. Specific website keywords -> browser task
+  const SITE_KEYWORDS = /\b(youtube|yt|amazon|flipkart|github|reddit|twitter|facebook|instagram|linkedin|netflix|spotify|whatsapp|wikipedia|cricbuzz|stackoverflow)\b/i;
+  if (SITE_KEYWORDS.test(t)) return false;
+
+  // 3. Page inspection / manipulation commands or profile questions -> browser task
+  const PAGE_ACTIONS = /\b(this page|current page|on this page|summarize|summarise|scrape|extract|download|click|scroll|type in|press|fill out|submit form|profile|my name|my email|my phone|my age|my address)\b/i;
+  if (PAGE_ACTIONS.test(t)) return false;
+
+  // 4. Navigation action verbs at the start of prompt -> browser task
+  const NAV_STARTERS = /^(open|go to|navigate to|browse to|visit|launch|load)\b/i;
+  if (NAV_STARTERS.test(t)) return false;
+
+  // 5. Search verbs with explicit web intent
+  const WEB_SEARCH = /\b(search the web|search online|search google|google for|bing for)\b/i;
+  if (WEB_SEARCH.test(t)) return false;
+
+  // 6. Direct date, time, greetings, small talk without web dependencies
+  const CONVERSATIONAL_PATTERNS = [
+    /^(hi|hello|hey|greetings|good\s*(morning|afternoon|evening|night)|thanks|thank you)\b/i,
+    /\b(today\x27?s?\s*date|current\s*date|date\s*today|what\s*time|current\s*time|time\s*now)\b/i,
+  ];
+
+  for (const re of CONVERSATIONAL_PATTERNS) {
+    if (re.test(t)) return true;
+  }
+
+  return false;
+}
+
+async function handleConversationalTask(msg, respond, settings) {
+  const sessionId = msg.sessionId || `chat_${Date.now()}`;
+  agentState = createEmptyAgentState({
+    running: true,
+    sessionId,
+    mode: 'chat',
+    task: msg.task,
+    settings,
+  });
+
+  respond({ ok: true, sessionId });
+  broadcast(MSG.AGENT_STARTED);
+  setBadge('AI', '#7c6af7');
+  startRunKeepalive();
+
+  try {
+    pushStep(STEP_TYPE.THINKING, 'Thinking…');
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+
+    const systemPrompt = `You are TechyMind, a helpful and intelligent AI assistant.
+Current Date: ${dateStr}
+Current Time: ${timeStr}
+
+Answer the user concisely, accurately, and naturally. If the user asks for the date or time, answer using the exact current date and time provided above.`;
+
+    const fullPrompt = `${systemPrompt}\n\nUser: ${msg.task}\nAssistant:`;
+
+    let cleanAnswer = '';
+    try {
+      const raw = await callAIRaw(settings, fullPrompt, { onUsage: trackUsage });
+      cleanAnswer = typeof raw === 'string' ? raw.trim() : JSON.stringify(raw);
+    } catch (aiErr) {
+      const res = await callAI(settings, fullPrompt, null, { maxTokens: 400 });
+      cleanAnswer = typeof res === 'string' ? res : (res.thought || res.message || res.text || JSON.stringify(res));
+    }
+
+    agentState.running = false;
+    agentState.finalStatus = 'done';
+    setBadge('', '#7c6af7');
+    stopRunKeepalive();
+
+    pushStep(STEP_TYPE.DONE, cleanAnswer, { finalAnswer: cleanAnswer });
+    broadcast({ type: MSG.AGENT_DONE, answer: cleanAnswer, summary: { steps: 1, finalAnswer: cleanAnswer } });
+
+    appendHistory({
+      id: sessionId,
+      task: msg.task,
+      status: 'done',
+      result: cleanAnswer.substring(0, 300),
+      steps: 1,
+      time: Date.now(),
+      mode: 'chat',
+    });
+  } catch (err) {
+    agentState.running = false;
+    agentState.finalStatus = 'error';
+    setBadge('ERR', '#f04a6a');
+    stopRunKeepalive();
+    pushStep(STEP_TYPE.ERROR, `Error: ${err.message}`, { error: err.message });
+    broadcast({ type: MSG.AGENT_ERROR, error: err.message });
+  }
+}
+
 // START
 /**
  * Handles the start of an agent task.
@@ -342,9 +531,18 @@ async function handleGetOllamaModels(msg, respond) {
  */
 async function handleStart(msg, respond) {
   if (agentState.running || _startBusy) {
-    logBusy.warn('START_AGENT rejected — an agent task is already running (busy).');
-    respond({ ok: false, error: 'Already running' });
-    return;
+    if (agentState._privacyAbort) {
+      try { agentState._privacyAbort.abort(); } catch {}
+    }
+    agentState.stopRequested = true;
+    let waitLoops = 0;
+    while ((agentState.running || _startBusy) && waitLoops < 6) {
+      await sleep(50);
+      waitLoops++;
+    }
+    agentState.running = false;
+    agentState.stopRequested = false;
+    _startBusy = false;
   }
   _startBusy = true;
   try {
@@ -356,9 +554,10 @@ async function handleStart(msg, respond) {
 
 async function handleStartInner(msg, respond) {
   if (agentState.running) {
-    logBusy.warn('START_AGENT rejected — an agent task is already running (busy).');
-    respond({ ok: false, error: 'Already running' });
-    return;
+    if (agentState._privacyAbort) {
+      try { agentState._privacyAbort.abort(); } catch {}
+    }
+    agentState.running = false;
   }
 
   const settings = await getSettings();
@@ -368,20 +567,44 @@ async function handleStartInner(msg, respond) {
     return;
   }
 
+  // 1. Direct conversational answer without browsing
+  if (isConversationalTask(msg.task)) {
+    await handleConversationalTask(msg, respond, settings);
+    return;
+  }
+
+  let [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const bootstrapped = PRIVILEGED_URL_RE_SW.test(activeTab?.url || '');
+
+  // 2. Handle summarize intent on browser newtab gracefully
+  if (isSummarizeIntent(msg.task) && bootstrapped) {
+    const note = "You are currently on a browser new tab (chrome://newtab). Please open or navigate to the webpage you want to summarize first, then click Summarize.";
+    respond({ ok: true, sessionId: `summarize_${Date.now()}` });
+    broadcast(MSG.AGENT_STARTED);
+    pushStep(STEP_TYPE.DONE, note, { finalAnswer: note });
+    broadcast({ type: MSG.AGENT_DONE, answer: note, summary: { steps: 1, finalAnswer: note } });
+    return;
+  }
+
   const caps = getProviderCapabilities(settings);
   if (!caps.browserAgentSafe) {
     respond({ ok: false, error: `${settings.provider} does not support vision — choose a vision-capable provider for best results.` });
     return;
   }
-
-  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-
-  // Browser-internal page (chrome://newtab is the DEFAULT landing page) →
-  // open the task's target site in the working tab instead of cloning a
-  // useless internal page the agent can neither capture nor script.
-  const bootstrapped = PRIVILEGED_URL_RE_SW.test(activeTab?.url || '');
-  const workingUrl  = bootstrapped ? inferStartUrlFromTask(msg.task) : (activeTab?.url || 'about:blank');
-  const startHost   = getHostFromUrl(workingUrl);
+  let workingUrl = bootstrapped ? inferStartUrlFromTask(msg.task) : (activeTab?.url || 'about:blank');
+  if (!bootstrapped && activeTab?.url) {
+    const crossDomainUrl = detectCrossDomainSwitch(msg.task, activeTab.url);
+    if (crossDomainUrl) {
+      workingUrl = crossDomainUrl;
+      try {
+        await chrome.tabs.update(activeTab.id, { url: crossDomainUrl });
+        await waitForTabLoad(activeTab.id);
+        const fresh = await chrome.tabs.get(activeTab.id);
+        if (fresh) activeTab = fresh;
+      } catch {}
+    }
+  }
+  const startHost = getHostFromUrl(workingUrl);
 
   const isContinuing = msg.sessionId && msg.sessionId === agentState.sessionId;
   let reuseTabId = null;
@@ -442,7 +665,7 @@ async function handleStartInner(msg, respond) {
     }
   } catch (err) {
     // Non-fatal: skill auto-detection failure must never block the agent.
-    console.warn('[Open Comet] Skill auto-detection failed silently:', err.message);
+    console.warn('[TechyMind] Skill auto-detection failed silently:', err.message);
   }
 
   respond({ ok: true, sessionId: agentState.sessionId });
@@ -455,19 +678,35 @@ async function handleStartInner(msg, respond) {
     pushStep(STEP_TYPE.THINKING, `Browser-internal page detected — opening ${bootHost} for your task instead…`);
   }
 
-  // Open the working tab
-  if (reuseTabId) {
-    await chrome.tabs.update(reuseTabId, { active: true });
-    await groupTaskTabs([reuseTabId]);
-    broadcastToTabs({ type: MSG.AGENT_STARTED, state: agentState });
+  // Open the working tab — strict single-tab live automation
+  let targetTabId = reuseTabId;
+  if (!targetTabId) {
+    if (activeTab?.id) {
+      if (bootstrapped && workingUrl && !PRIVILEGED_URL_RE_SW.test(workingUrl)) {
+        try {
+          await chrome.tabs.update(activeTab.id, { url: workingUrl, active: true });
+          targetTabId = activeTab.id;
+        } catch {
+          const agentTab = await chrome.tabs.create({ url: workingUrl, active: true });
+          targetTabId = agentTab.id;
+        }
+      } else {
+        targetTabId = activeTab.id;
+      }
+    } else {
+      const agentTab = await chrome.tabs.create({ url: workingUrl, active: true });
+      targetTabId = agentTab.id;
+    }
   } else {
-    const agentTab = await chrome.tabs.create({ url: workingUrl, active: true });
-    agentState.agentTabId = agentTab.id;
-    agentState.taskTabIds = [agentTab.id];
-    rememberTab(agentTab);
-    await groupTaskTabs([agentTab.id]);
-    broadcastToTabs({ type: MSG.AGENT_STARTED, state: agentState });
+    await chrome.tabs.update(targetTabId, { active: true });
   }
+  agentState.agentTabId = targetTabId;
+  agentState.taskTabIds = [targetTabId];
+  rememberTab({ id: targetTabId, url: workingUrl });
+  if (settings.enableTabGrouping) {
+    await groupTaskTabs([targetTabId]);
+  }
+  broadcastToTabs({ type: MSG.AGENT_STARTED, state: agentState });
 
   await sleep(1500);
   await planPhase();
@@ -552,7 +791,7 @@ async function activatePlannedSkills(plan) {
       }
     }
   } catch (err) {
-    console.warn('[Open Comet] Planned skill activation failed:', err.message);
+    console.warn('[TechyMind] Planned skill activation failed:', err.message);
   }
 }
 
@@ -684,7 +923,11 @@ async function handleResolveApproval(msg, respond) {
       resolveAllActionApprovals('skip');
     } else {
       agentState.stopRequested = true;
-      try { agentState._privacyAbort?.abort?.(); } catch { /* already aborted */ }
+      try {
+        const abortErr = new Error('Agent stopped by user');
+        abortErr.name = 'AbortError';
+        agentState._privacyAbort?.abort?.(abortErr);
+      } catch { /* already aborted */ }
       resolveAllActionApprovals('stop');
     }
     respond({ ok: true });
@@ -817,7 +1060,7 @@ async function executionPhase() {
         if (gAuth.skip) {
           pushStep(STEP_TYPE.MUTED, `🛡️ ${gAuth.userMessage} (attempt ${gAuth.hit}/${GUARDIAN_HIT_LIMIT}) — to allow it, put it in your own words: edit the task or send a note.`);
           agentState.taskMemory.pendingGuardianHint = gAuth.hint;   // next-decision override
-          console.warn(`[Open Comet] Guardian BLOCKED ${describeAction(action)} (${gAuth.hit}/${GUARDIAN_HIT_LIMIT})`);
+          console.warn(`[TechyMind] Guardian BLOCKED ${describeAction(action)} (${gAuth.hit}/${GUARDIAN_HIT_LIMIT})`);
           continue;
         }
       }
@@ -974,7 +1217,7 @@ async function finishSuccess(result) {
   agentState.finalStatus = 'done';
   const guardianData = guardianRunData();   // v1.19.0: surface gate accounting
   broadcastMessage({ type: MSG.AGENT_DONE, answer, data: { ...(result.data || {}), ...(guardianData ? { guardian: guardianData } : {}) }, steps: agentState.steps, sessionId: agentState.sessionId });
-  notify('Open Comet — task complete', answer);
+  notify('TechyMind — task complete', answer);
   setBadge('', '#7c6af7');
   stopRunKeepalive();
   await appendHistory({ id: agentState.sessionId, task: agentState.task, status: 'done', result: answer.substring(0, 300), steps: agentState.steps.length, tokens: agentState.taskUsage?.totalTokens || 0, cost: agentState.taskUsage?.cost || 0, time: Date.now() });
@@ -1014,7 +1257,7 @@ async function finishGuardianExit(userMessage) {
   stopRunKeepalive();
   const guardianData = guardianRunData();   // v1.19.0: exits are counter events too
   broadcastMessage({ type: MSG.AGENT_DONE, answer, data: { guardianExit: true, ...(guardianData ? { guardian: guardianData } : {}) }, steps: agentState.steps, sessionId: agentState.sessionId });
-  notify('Open Comet — stopped by the Task Authorization Guardian', answer);
+  notify('TechyMind — stopped by the Task Authorization Guardian', answer);
   setBadge('', '#7c6af7');
   await appendHistory({ id: agentState.sessionId, task: agentState.task, status: 'blocked', result: answer.substring(0, 300), steps: agentState.steps.length, tokens: agentState.taskUsage?.totalTokens || 0, cost: agentState.taskUsage?.cost || 0, time: Date.now() });
   await flushGuardianLifetime();
@@ -1029,7 +1272,7 @@ function fatalError(err) {
   stopRunKeepalive();
   broadcastMessage({ type: MSG.AGENT_ERROR, error: err.message, steps: agentState.steps, sessionId: agentState.sessionId });
   broadcastStatus(STATUS.IDLE);
-  notify('Open Comet error', err.message);
+  notify('TechyMind error', err.message);
   setBadge('ERR', '#f04a6a');
   flushGuardianLifetime();   // v1.19.0: fire-and-forget — errors flush too
   setTimeout(() => setBadge('', '#7c6af7'), 5000);
@@ -1121,8 +1364,9 @@ async function injectScreenshotOverlay(tabId, interactiveElements = []) {
       target: { tabId },
       args: [items],
       func: (itemsToLabel) => {
-        const OVERLAY_ID = '__opencomet_capture_overlay';
+        const OVERLAY_ID = '__techymind_capture_overlay';
         document.getElementById(OVERLAY_ID)?.remove();
+        document.getElementById('__opencomet_capture_overlay')?.remove();
 
         const overlay = document.createElement('div');
         overlay.id = OVERLAY_ID;
@@ -1188,9 +1432,11 @@ async function removeScreenshotOverlay(tabId) {
   await chrome.scripting.executeScript({
     target: { tabId },
     func: () => {
+      document.getElementById('__techymind_capture_overlay')?.remove();
       document.getElementById('__opencomet_capture_overlay')?.remove();
       // DOM-detector boxes (painted at scan time) are removed with the same
       // teardown path so post-screenshot cleanup covers both painters
+      document.getElementById('techymind-dom-highlight-container')?.remove();
       document.getElementById('oc-dom-highlight-container')?.remove();
     },
   }).catch(() => {});
@@ -1212,7 +1458,7 @@ async function runDomDetector(tabId, options) {
   const scanCall = args =>
     chrome.scripting.executeScript({
       target: { tabId },
-      func: opts => (typeof window.__openCometDomDetect === 'function' ? window.__openCometDomDetect(opts) : null),
+      func: opts => ((typeof window.__techymindDomDetect === 'function' ? window.__techymindDomDetect(opts) : null) || (typeof window.__openCometDomDetect === 'function' ? window.__openCometDomDetect(opts) : null)),
       args: [args],
     });
 
@@ -1246,7 +1492,8 @@ async function getPageInfo(tabId) {
       target: { tabId },
       args:   [tabId, skipElementScan],
       func: (currentTabId, elementScanSkipped) => {
-        const UID  = 'data-opencomet-agent-uid';
+        const UID  = 'data-techymind-agent-uid';
+        const LEGACY_UID = 'data-opencomet-agent-uid';
         const norm = v => String(v || '').replace(/\s+/g, ' ').trim();
         const vis  = el => { const r = el.getBoundingClientRect(), s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden'; };
         const cleanCssToken = value => String(value || '')
@@ -1315,8 +1562,9 @@ async function getPageInfo(tabId) {
           const key     = [role, text, ph, ariaLabel, href, domPath].join('|').toLowerCase();
           if (seen.has(key)) continue;
           seen.add(key);
-          const uid = el.getAttribute(UID) || `nx-${items.length + 1}`;
+          const uid = el.getAttribute(UID) || el.getAttribute(LEGACY_UID) || `nx-${items.length + 1}`;
           el.setAttribute(UID, uid);
+          el.setAttribute(LEGACY_UID, uid);
           // DISAMBIGUATION: nearest form/section context label — the
           // "nearform" half of the receipt ("Buy Now #2" inside which card?).
           let nearHint = '';
@@ -1841,7 +2089,7 @@ async function exportDataPayload(payload, options = {}) {
     dataset: payload,
     formats,
     baseName: options.baseName,
-    folder: settings.exportFolder || 'Open Comet Exports',
+    folder: settings.exportFolder || 'TechyMind Exports',
     diskLabel: settings.exportDiskLabel || 'Default Downloads',
     prompt: Boolean(settings.exportPrompt),
   });
@@ -2041,7 +2289,11 @@ async function handleStop(respond) {
   // SIH fix: privacy runs were UNSTOPPABLE — the loop's only abort check is
   // its AbortSignal and nothing ever called .abort(). Pull it here so the
   // Stop button (and Reset) actually interrupts a privacy run.
-  try { agentState._privacyAbort?.abort?.(); } catch { /* already aborted */ }
+  try {
+    const abortErr = new Error('Agent stopped by user');
+    abortErr.name = 'AbortError';
+    agentState._privacyAbort?.abort?.(abortErr);
+  } catch { /* already aborted */ }
   flushGuardianLifetime();   // v1.19.0: user stop flushes the daemon counter (all-zero = no-op)
   // ZOMBIE-UI FIX: when the standard loop had ALREADY returned at the
   // approval gate (agentState.paused), nothing was alive to broadcast
@@ -2076,7 +2328,11 @@ async function handleReset(respond) {
   stopRunKeepalive();   // reset ends any run — release the heartbeat
   resolveAllActionApprovals('stop');   // v1.15.1: release a paused approval gate too
   // SIH fix: also abort an in-flight privacy run (same as handleStop).
-  try { agentState._privacyAbort?.abort?.(); } catch { /* already aborted */ }
+  try {
+    const abortErr = new Error('Agent reset by user');
+    abortErr.name = 'AbortError';
+    agentState._privacyAbort?.abort?.(abortErr);
+  } catch { /* already aborted */ }
   setBadge('', '#7c6af7');
   broadcastMessage({ type: MSG.CHAT_RESET, sessionId: agentState.sessionId });
   // Free the on-device KV cache for the dead session (gemma4-engine hygiene).
@@ -2099,7 +2355,7 @@ function pushStep(type, text, extra = {}) {
   const step = { type, text, ...extra, time: now, dtMs, index: agentState.steps.length };
   agentState.steps.push(step);
   broadcastMessage({ type: MSG.STEP_UPDATE, step, stepCount: agentState.steps.length });
-  console.log(`[Open Comet] ${text}${dtMs > 0 ? `  (+${(dtMs / 1000).toFixed(1)}s)` : ''}`);
+  console.log(`[TechyMind] ${text}${dtMs > 0 ? `  (+${(dtMs / 1000).toFixed(1)}s)` : ''}`);
 }
 
 function asImageDataUrl(base64) {
@@ -2315,6 +2571,16 @@ Instructions:
 - Then list 4-6 bullet key points.
 - Use only the provided content.`;
     const summary = await callAIRaw(settings, prompt, { onUsage: trackUsage });
+    await appendHistory({
+      id: 'sum_' + Date.now(),
+      task: msg.task || `Summarize: ${page.title || 'Page'}`,
+      status: 'done',
+      result: summary,
+      steps: 1,
+      tokens: 0,
+      cost: 0,
+      time: Date.now(),
+    });
     broadcastMessage({
       type: MSG.SUMMARIZE_DONE,
       task: msg.task || page.title || 'Summarize current page',
@@ -2411,6 +2677,17 @@ async function handleScrapePage(msg, respond) {
         });
       }
     }
+
+    await appendHistory({
+      id: 'scr_' + Date.now(),
+      task: goal || page?.title || 'Scrape page',
+      status: 'done',
+      result: `Scraped ${Array.isArray(dataset) ? dataset.length : 1} item(s) from ${page?.title || 'page'}.`,
+      steps: 1,
+      tokens: 0,
+      cost: 0,
+      time: Date.now(),
+    });
 
     broadcastMessage({
       type: MSG.SCRAPE_DONE,
@@ -2589,13 +2866,13 @@ function normalizeExportFormats(formats) {
 }
 
 function makeExportBaseName(value) {
-  return String(value || 'open-comet-export')
+  return String(value || 'techymind-export')
     .replace(/[^\w\s-]+/g, ' ')
     .replace(/\s+/g, '-')
     .replace(/-+/g, '-')
     .trim()
     .substring(0, 60)
-    .toLowerCase() || `open-comet-export-${Date.now()}`;
+    .toLowerCase() || `techymind-export-${Date.now()}`;
 }
 
 async function runWithConcurrency(tasks, concurrency = 2) {
@@ -2613,13 +2890,13 @@ async function runWithConcurrency(tasks, concurrency = 2) {
   return results;
 }
 
-async function groupLooseTabs(tabIds, title = 'Open Comet Research') {
+async function groupLooseTabs(tabIds, title = 'TechyMind Research') {
   const ids = [...new Set((tabIds || []).filter(Number.isInteger))];
   if (!ids.length) return null;
   try {
     const groupId = await chrome.tabs.group({ tabIds: ids });
     await chrome.tabGroups.update(groupId, {
-      title: String(title || 'Open Comet Research').substring(0, 40),
+      title: String(title || 'TechyMind Research').substring(0, 40),
       color: 'blue',
       collapsed: false,
     });
@@ -2639,41 +2916,7 @@ async function groupLooseTabs(tabIds, title = 'Open Comet Research') {
 // (user: "WTF we always user is not able to start task with new tab?").
 // Instead we infer a useful landing page from the task text and navigate
 // the disposable tab there automatically.
-const PRIVILEGED_URL_RE_SW = /^(chrome|edge|about|devtools|view-source|chrome-extension|moz-extension):|^https?:\/\/chromewebstore\.google\.com/i;
 let pendingBootstrapNote = null;
-
-function inferStartUrlFromTask(task) {
-  const t = String(task || '').toLowerCase();
-  const SITES = [
-    // "yt music" / "youtube music" must land on YouTube Music itself —
-    // the generic youtube rule used to open www.youtube.com and the VLM then
-    // burned 1-2 full turns (30-90 s each) navigating to music.youtube.com.
-    [/yt\s*music|youtube\s*music|music\.youtube/, 'https://music.youtube.com'],
-    [/youtube|\byt\b|play a song|song\b|music video|watch video/, 'https://www.youtube.com'],
-    [/gmail|inbox|check my mail|\bmail\b/, 'https://mail.google.com'],
-    [/wikipedia/, 'https://en.wikipedia.org'],
-    [/flipkart/, 'https://www.flipkart.com'],
-    [/amazon|order online|shop online/, 'https://www.amazon.in'],
-    [/github|\brepo\b/, 'https://github.com'],
-    [/twitter|x\.com|tweet/, 'https://x.com'],
-    [/instagram|\binsta\b/, 'https://www.instagram.com'],
-    [/facebook|\bfb\b/, 'https://www.facebook.com'],
-    [/netflix|watch a movie|\bmovie\b/, 'https://www.netflix.com'],
-    [/spotify|play .*playlist/, 'https://open.spotify.com'],
-    [/whatsapp/, 'https://web.whatsapp.com'],
-    [/linkedin/, 'https://www.linkedin.com'],
-    [/reddit/, 'https://www.reddit.com'],
-    [/stack\s*overflow/, 'https://stackoverflow.com'],
-    [/chatgpt/, 'https://chatgpt.com'],
-    [/\bnews\b|headline/, 'https://news.google.com'],
-    [/cricket|\bipl\b|\bscore\b/, 'https://www.cricbuzz.com'],
-  ];
-  for (const [re, url] of SITES) if (re.test(t)) return url;
-  // Explicit domain mention: "on openai.com" / "go to example.org/page"
-  const dom = /((?:https?:\/\/)?(?:www\.)?[a-z0-9][a-z0-9-]*\.(?:com|org|net|in|io|co|ai|dev|gov|edu)(?:\/[^\s]*)?)/i.exec(t);
-  if (dom) return dom[1].startsWith('http') ? dom[1] : `https://${dom[1]}`;
-  return 'https://www.google.com';
-}
 
 function waitForTabLoad(tabId, timeoutMs = 15000) {
   return new Promise((resolve) => {
@@ -2693,9 +2936,21 @@ function waitForTabLoad(tabId, timeoutMs = 15000) {
 }
 
 async function handlePrivacyStart(msg, respond) {
+  // If an existing run is still active or busy, cleanly abort the prior cycle so
+  // sequential follow-up commands ("play the first song", "now check amazon") execute seamlessly.
   if (agentState.running || _startBusy) {
-    respond({ ok: false, error: 'Already running' });
-    return;
+    if (agentState._privacyAbort) {
+      try { agentState._privacyAbort.abort(); } catch {}
+    }
+    agentState.stopRequested = true;
+    let waitLoops = 0;
+    while ((agentState.running || _startBusy) && waitLoops < 6) {
+      await sleep(50);
+      waitLoops++;
+    }
+    agentState.running = false;
+    agentState.stopRequested = false;
+    _startBusy = false;
   }
   _startBusy = true;
   try {
@@ -2707,11 +2962,18 @@ async function handlePrivacyStart(msg, respond) {
 
 async function handlePrivacyStartInner(msg, respond) {
   if (agentState.running) {
-    respond({ ok: false, error: 'Already running' });
-    return;
+    if (agentState._privacyAbort) {
+      try { agentState._privacyAbort.abort(); } catch {}
+    }
+    agentState.running = false;
   }
 
   const settings = await getSettings();
+  if (isConversationalTask(msg.task)) {
+    await handleConversationalTask(msg, respond, settings);
+    return;
+  }
+
   // Apply privacy settings from msg or fall back to defaults
   const privacyCfg = msg.privacy || {};
   configurePrivacy({
@@ -2726,6 +2988,15 @@ async function handlePrivacyStartInner(msg, respond) {
 
   let activeTab = (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null;
   if (!activeTab) { respond({ ok: false, error: 'No active tab' }); return; }
+
+  if (isSummarizeIntent(msg.task) && PRIVILEGED_URL_RE_SW.test(activeTab.url || '')) {
+    const note = "You are currently on a browser new tab (chrome://newtab). Please open or navigate to the webpage you want to summarize first, then click Summarize.";
+    respond({ ok: true, sessionId: `summarize_${Date.now()}` });
+    broadcast(MSG.AGENT_STARTED);
+    pushStep(STEP_TYPE.DONE, note, { finalAnswer: note });
+    broadcast({ type: MSG.AGENT_DONE, answer: note, summary: { steps: 1, finalAnswer: note } });
+    return;
+  }
 
   // COLD-START ELIMINATION: warm the on-device vision models in the
   // background while the session's first DOM steps run. The first capture then
@@ -2743,11 +3014,11 @@ async function handlePrivacyStartInner(msg, respond) {
     })
     .catch(() => {});
 
-  // Browser-internal page (chrome://newtab etc.) → auto-navigate to a page
+  // 1. Browser-internal page (chrome://newtab etc.) → auto-navigate to a page
   // inferred from the task instead of dead-ending with an error.
   if (PRIVILEGED_URL_RE_SW.test(activeTab.url || '')) {
     activeTab = await (async () => {
-      const targetUrl = inferStartUrlFromTask(msg.task);
+      const targetUrl = inferStartUrlFromTask(msg.task) || 'https://www.google.com';
       let host = targetUrl;
       try { host = new URL(targetUrl).hostname.replace(/^www\./, ''); } catch {}
       pendingBootstrapNote = `Browser-internal page detected (${String(activeTab.url || 'about:blank').slice(0, 40)}) — opening ${host} for your task instead…`;
@@ -2769,17 +3040,53 @@ async function handlePrivacyStartInner(msg, respond) {
     })();
     if (!activeTab) return;
   }
+  // 2. Cross-domain intent switch (e.g. on YouTube and user says "now open amazon and check shoes")
+  else {
+    const crossDomainUrl = detectCrossDomainSwitch(msg.task, activeTab.url);
+    if (crossDomainUrl) {
+      activeTab = await (async () => {
+        let host = crossDomainUrl;
+        try { host = new URL(crossDomainUrl).hostname.replace(/^www\./, ''); } catch {}
+        pushStep(STEP_TYPE.THINKING, `Cross-domain intent detected — navigating to ${host} for your task…`);
+        try {
+          await chrome.tabs.update(activeTab.id, { url: crossDomainUrl });
+        } catch {
+          try {
+            activeTab = await chrome.tabs.create({ url: crossDomainUrl, active: true });
+          } catch {
+            return activeTab;
+          }
+        }
+        await waitForTabLoad(activeTab.id);
+        try { const fresh = await chrome.tabs.get(activeTab.id); return fresh || activeTab; } catch { return activeTab; }
+      })();
+      if (!activeTab) return;
+    }
+  }
+
+  const isContinuing = Boolean(msg.sessionId && (msg.sessionId === agentState.sessionId || agentState.sessionId));
+  const activeSessionId = msg.sessionId || agentState.sessionId || `privacy_${Date.now()}`;
+  const oldGroupId = isContinuing ? agentState.agentGroupId : null;
+  const oldTabIds = isContinuing && Array.isArray(agentState.taskTabIds) && agentState.taskTabIds.length ? agentState.taskTabIds : [activeTab.id];
+  const oldSteps = isContinuing && Array.isArray(agentState.steps) ? agentState.steps : [];
+  const oldHistory = isContinuing && Array.isArray(agentState.history) ? agentState.history : [];
+  const prevConvo = isContinuing && Array.isArray(agentState.conversationHistory) ? agentState.conversationHistory : [];
 
   agentState = createEmptyAgentState({
     running: true,
     currentTabId: activeTab.id,
-    sessionId: `privacy_${Date.now()}`,
+    sessionId: activeSessionId,
     mode: 'privacy',
     task: msg.task,
     settings,
     maxIterations: settings.maxSteps || 25,
     startUrl: activeTab.url,
     startTitle: activeTab.title,
+    agentGroupId: oldGroupId,
+    taskTabIds: oldTabIds,
+    steps: oldSteps,
+    history: oldHistory,
+    conversationHistory: [...prevConvo, { role: 'user', text: msg.task, time: Date.now() }],
   });
 
   // ASK-BEFORE-ACTING: the composer mode now REACHES privacy runs
@@ -2795,13 +3102,15 @@ async function handlePrivacyStartInner(msg, respond) {
   agentState.agentTabId = activeTab.id;
   agentState.taskTabIds = [activeTab.id];
   rememberTab(activeTab);
-  await groupTaskTabs([activeTab.id]);
+  if (settings.enableTabGrouping) {
+    await groupTaskTabs([activeTab.id]);
+    pushStep(STEP_TYPE.MUTED, 'Tab-group sandbox: task tabs are grouped — the agent acts only inside this group.', { phase: 'sandbox' });
+  }
 
   if (pendingBootstrapNote) {
     pushStep(STEP_TYPE.THINKING, pendingBootstrapNote);
     pendingBootstrapNote = null;
   }
-  pushStep(STEP_TYPE.MUTED, 'Tab-group sandbox: task tabs are grouped — the agent acts only inside this group.', { phase: 'sandbox' });
 
   respond({ ok: true, sessionId: agentState.sessionId });
   broadcast(MSG.AGENT_STARTED);
@@ -2861,17 +3170,23 @@ async function handlePrivacyStartInner(msg, respond) {
       });
     },
     onError: (err) => {
+      const isAborted = controller.signal.aborted || /aborted/i.test(err?.message || '');
       agentState.running = false;
-      agentState.finalStatus = controller.signal.aborted ? 'stopped' : 'error';
-      setBadge(controller.signal.aborted ? '' : 'ERR', controller.signal.aborted ? '#7c6af7' : '#f04a6a');
+      agentState.finalStatus = isAborted ? 'stopped' : 'error';
+      setBadge(isAborted ? '' : 'ERR', isAborted ? '#7c6af7' : '#f04a6a');
       stopRunKeepalive();
-      pushStep(STEP_TYPE.ERROR, `Privacy agent error: ${err.message}`, { error: err.message });
-      broadcast({ type: MSG.AGENT_ERROR, error: err.message });
+      if (isAborted) {
+        pushStep(STEP_TYPE.EXECUTING, 'Task stopped by you.');
+        broadcastMessage({ type: MSG.AGENT_STOPPED });
+      } else {
+        pushStep(STEP_TYPE.ERROR, `Privacy agent error: ${err.message}`, { error: err.message });
+        broadcast({ type: MSG.AGENT_ERROR, error: err.message });
+      }
       appendHistory({
         id: agentState.sessionId,
         task: agentState.task,
-        status: controller.signal.aborted ? 'stopped' : 'error',
-        result: controller.signal.aborted ? 'Stopped by user.' : String(err?.message || err).substring(0, 300),
+        status: isAborted ? 'stopped' : 'error',
+        result: isAborted ? 'Stopped by user.' : String(err?.message || err).substring(0, 300),
         steps: agentState.steps.length,
         time: Date.now(),
         mode: 'privacy',
@@ -2933,12 +3248,15 @@ function startRunKeepalive() {
   // Backstop alarm (~30s minimum period). Failure is non-fatal — the interval
   // and the snapshot still cover the common cases.
   try {
-    chrome.alarms?.create('opencomet_run_keepalive', { periodInMinutes: 0.5 });
+    chrome.alarms?.create('techymind_run_keepalive', { periodInMinutes: 0.5 });
   } catch { /* alarms unavailable — belt without braces */ }
 }
 function stopRunKeepalive() {
   if (_runKeepaliveTimer) { clearInterval(_runKeepaliveTimer); _runKeepaliveTimer = null; }
-  try { chrome.alarms?.clear('opencomet_run_keepalive'); } catch { /* noop */ }
+  try {
+    chrome.alarms?.clear('techymind_run_keepalive');
+    chrome.alarms?.clear('opencomet_run_keepalive');
+  } catch { /* noop */ }
   clearActiveRunSnapshot();   // every terminal path funnels through here
 }
 
@@ -2946,7 +3264,8 @@ function stopRunKeepalive() {
 // Written when a run starts, cleared on EVERY terminal path (finish/stop/
 // reset/error — all call stopRunKeepalive). If the SW ever boots and the
 // snapshot is still present, the previous worker died mid-run.
-const ACTIVE_RUN_KEY = 'opencometActiveRun';
+const ACTIVE_RUN_KEY = 'techymindActiveRun';
+const LEGACY_ACTIVE_RUN_KEY = 'opencometActiveRun';
 function writeActiveRunSnapshot(info) {
   try {
     const p = chrome.storage?.session?.set({ [ACTIVE_RUN_KEY]: { ...info, startedAt: Date.now() } });
@@ -2955,7 +3274,7 @@ function writeActiveRunSnapshot(info) {
 }
 function clearActiveRunSnapshot() {
   try {
-    const p = chrome.storage?.session?.remove(ACTIVE_RUN_KEY);
+    const p = chrome.storage?.session?.remove([ACTIVE_RUN_KEY, LEGACY_ACTIVE_RUN_KEY]);
     if (p?.catch) p.catch(() => {});
   } catch { /* noop */ }
 }
@@ -2968,12 +3287,15 @@ function clearActiveRunSnapshot() {
 // in place (the user may want the tabs) but nothing resumes the dead loop.
 (async () => {
   try {
-    const data = await chrome.storage?.session?.get(ACTIVE_RUN_KEY);
-    const run = data?.[ACTIVE_RUN_KEY];
+    const data = await chrome.storage?.session?.get([ACTIVE_RUN_KEY, LEGACY_ACTIVE_RUN_KEY]);
+    const run = data?.[ACTIVE_RUN_KEY] || data?.[LEGACY_ACTIVE_RUN_KEY];
     if (!run) return;
-    await chrome.storage?.session?.remove(ACTIVE_RUN_KEY);
+    await chrome.storage?.session?.remove([ACTIVE_RUN_KEY, LEGACY_ACTIVE_RUN_KEY]);
     if (_runKeepaliveTimer) { clearInterval(_runKeepaliveTimer); _runKeepaliveTimer = null; }
-    try { await chrome.alarms?.clear('opencomet_run_keepalive'); } catch { /* noop */ }
+    try {
+      await chrome.alarms?.clear('techymind_run_keepalive');
+      await chrome.alarms?.clear('opencomet_run_keepalive');
+    } catch { /* noop */ }
     try { setBadge('', '#7c6af7'); } catch { /* noop */ }
     await appendHistory({
       id: String(run.sessionId || `session_${Date.now()}`),

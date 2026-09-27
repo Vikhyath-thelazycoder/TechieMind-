@@ -41,6 +41,14 @@
         </svg>
         <span>New</span>
       </button>
+      <button class="header-action-btn" id="openTabBtn" title="Open TechyMind in full browser tab">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+          <polyline points="15 3 21 3 21 9"></polyline>
+          <line x1="10" y1="14" x2="21" y2="3"></line>
+        </svg>
+        <span>Tab</span>
+      </button>
     </div>
   </div>
 
@@ -314,8 +322,12 @@
             </div>
           </div>
 
-          <div class="run-context-hint" id="runContextHint">
-            Task running. Add extra context here and press send.
+          <div class="attachment-preview-bar" id="attachmentPreviewBar" style="display:none">
+            <div class="attachment-chip" id="attachmentChip">
+              <img id="attachmentThumb" src="" alt="preview" style="display:none" />
+              <span class="attachment-name" id="attachmentName">file.png</span>
+              <button type="button" class="attachment-remove-btn" id="attachmentRemoveBtn" title="Remove attachment">×</button>
+            </div>
           </div>
 
           <textarea id="taskInput" placeholder="What are we doing today?" rows="2"></textarea>
@@ -328,6 +340,12 @@
               </svg>
             </button>
             <div class="input-actions">
+              <button class="attach-btn" id="attachFileBtn" title="Attach image or file for visual analysis" type="button">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+                </svg>
+              </button>
+              <input type="file" id="fileAttachmentInput" accept="image/*,.pdf,.txt,.csv,.json" style="display:none;" />
               <button class="voice-lang-btn" id="voiceLangBtn" title="Switch Voice Language (EN / HI / KN)" type="button">
                 <span id="voiceLangLabel">EN</span>
               </button>
@@ -345,12 +363,12 @@
                   <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/>
                 </svg>
               </button>
-              <button class="stop-btn" id="stopBtn" title="Stop">
+              <button class="stop-btn" id="stopBtn" title="Stop Task" style="display:none;">
                 <svg width="11" height="11" viewBox="0 0 11 11" fill="currentColor">
                   <rect x="1" y="1" width="9" height="9" rx="2"/>
                 </svg>
               </button>
-              <button class="send-btn" id="sendBtn" title="Run">
+              <button class="send-btn" id="sendBtn" title="Run Task">
                 <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
                   <path d="M7.5 2V13M7.5 2L3 6.5M7.5 2L12 6.5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>

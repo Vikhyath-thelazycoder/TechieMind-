@@ -1,10 +1,11 @@
-// Open Comet — Content Script
+// TechyMind — Content Script
 // Injects live overlay HUD into pages while agent is working
 // UI matches Claude.ai aesthetic: warm cream/charcoal, minimal, clean
 
 (function () {
   'use strict';
-  if (window.__opencometInjected) return;
+  if (window.__techymindInjected || window.__opencometInjected) return;
+  window.__techymindInjected = true;
   window.__opencometInjected = true;
 
   let overlayEl  = null;
@@ -24,11 +25,11 @@
 
     // Styles
     const style = document.createElement('style');
-    style.id = 'open-comet-overlay-styles';
+    style.id = 'techymind-overlay-styles';
     style.textContent = `
 
       /* ── Overlay pill ── */
-      #open-comet-agent-overlay {
+      #techymind-agent-overlay, #open-comet-agent-overlay {
         position: fixed;
         bottom: 32px;
         left: 50%;
@@ -63,7 +64,7 @@
         to   { opacity: 1; transform: translateX(-50%) translateY(0)   scale(1);    }
       }
 
-      #open-comet-agent-overlay.open-comet-hiding {
+      #techymind-agent-overlay.techymind-hiding, #open-comet-agent-overlay.open-comet-hiding {
         opacity: 0;
         transform: translateX(-50%) translateY(12px) scale(0.96);
       }
@@ -154,7 +155,7 @@
         align-items: center;
       }
 
-      #open-comet-stop-btn {
+      #techymind-stop-btn, #open-comet-stop-btn {
         width: 34px;
         height: 34px;
         border-radius: 50%; /* Circle button */
@@ -169,18 +170,18 @@
         transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
       }
 
-      #open-comet-stop-btn:hover {
+      #techymind-stop-btn:hover, #open-comet-stop-btn:hover {
         background: rgba(255, 255, 255, 0.18);
         border-color: rgba(255, 255, 255, 0.3);
         transform: scale(1.05);
       }
 
-      #open-comet-stop-btn:active {
+      #techymind-stop-btn:active, #open-comet-stop-btn:active {
         transform: scale(0.92);
         background: rgba(255, 255, 255, 0.12);
       }
 
-      #open-comet-stop-btn svg {
+      #techymind-stop-btn svg, #open-comet-stop-btn svg {
         opacity: 0.9;
       }
 
@@ -191,19 +192,19 @@
     `;
 
     overlayEl = document.createElement('div');
-    overlayEl.id = 'open-comet-agent-overlay';
+    overlayEl.id = 'techymind-agent-overlay';
     overlayEl.innerHTML = `
       <div class="nc-brand">
         <div class="nc-logo">
-          <img id="open-comet-brand-logo" width="22" height="22" style="display:block;border-radius:4px;" />
+          <img id="techymind-brand-logo" width="22" height="22" style="display:block;border-radius:4px;" />
         </div>
       </div>
       <div class="nc-content">
         <div class="nc-label">TechyMind is working</div>
-        <div class="nc-status" id="open-comet-status-text">Starting…</div>
+        <div class="nc-status" id="techymind-status-text">Starting…</div>
       </div>
       <div class="nc-stop-wrap">
-        <button id="open-comet-stop-btn" title="Stop agent">
+        <button id="techymind-stop-btn" title="Stop agent">
           ${STOP_ICON_SVG}
         </button>
       </div>
@@ -214,16 +215,17 @@
     head.appendChild(style);
     body.appendChild(overlayEl);
 
-    statusEl = document.getElementById('open-comet-status-text');
+    statusEl = document.getElementById('techymind-status-text') || document.getElementById('open-comet-status-text');
     setAgentTitle(true);
 
     // Set logos
-    const brandLogo = document.getElementById('open-comet-brand-logo');
+    const brandLogo = document.getElementById('techymind-brand-logo') || document.getElementById('open-comet-brand-logo');
     if (brandLogo) {
       brandLogo.src = chrome.runtime.getURL('assets/icons/icon48.png');
     }
 
-    document.getElementById('open-comet-stop-btn')?.addEventListener('click', () => {
+    const stopBtn = document.getElementById('techymind-stop-btn') || document.getElementById('open-comet-stop-btn');
+    stopBtn?.addEventListener('click', () => {
       chrome.runtime.sendMessage({ type: 'STOP_AGENT' });
       removeOverlay();
     });
@@ -234,9 +236,11 @@
   // Remove overlay
   function removeOverlay() {
     if (!overlayEl) return;
+    overlayEl.classList.add('techymind-hiding');
     overlayEl.classList.add('open-comet-hiding');
     setTimeout(() => {
       overlayEl?.remove();
+      document.getElementById('techymind-overlay-styles')?.remove();
       document.getElementById('open-comet-overlay-styles')?.remove();
       overlayEl = null;
       statusEl  = null;
@@ -265,9 +269,15 @@
   }
 
   // Visual action click ripple feedback (Video 4 requirement)
-  function showClickRipple(x, y) {
+  // Visual action click ripple feedback (Video 4 requirement)
+  function showClickRipple(x, y, theme = 'action') {
     if (!Number.isFinite(x) || !Number.isFinite(y)) return;
     try {
+      const vo = window.__techymindVisualOverlay || window.__opencometVisualOverlay;
+      if (vo && typeof vo.showClickRipple === 'function') {
+        vo.showClickRipple(x, y, theme);
+        return;
+      }
       if (!document.getElementById('techymind-ripple-styles')) {
         const s = document.createElement('style');
         s.id = 'techymind-ripple-styles';
@@ -290,9 +300,9 @@
         margin-left: -16px;
         margin-top: -16px;
         border-radius: 50%;
-        border: 2px solid #e11d48;
-        background: rgba(225, 29, 72, 0.25);
-        box-shadow: 0 0 12px rgba(225, 29, 72, 0.6);
+        border: 2px solid #38bdf8;
+        background: rgba(56, 189, 248, 0.25);
+        box-shadow: 0 0 12px rgba(56, 189, 248, 0.6);
         pointer-events: none;
         z-index: 2147483647;
         animation: techymindRipple 0.65s cubic-bezier(0.1, 0.8, 0.3, 1) forwards;
@@ -305,7 +315,7 @@
   // Background message listener
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === 'SHOW_CLICK_RIPPLE' || msg.type === 'ACTION_CLICK_FEEDBACK') {
-      showClickRipple(msg.x, msg.y);
+      showClickRipple(msg.x, msg.y, msg.theme || 'action');
       return;
     }
 
@@ -361,7 +371,7 @@
     const total = (c.faces || 0) + (c.domSensitive || 0) + (c.textPii || 0);
 
     const el = document.createElement('div');
-    el.id = 'open-comet-redaction-viz';
+    el.id = 'techymind-redaction-viz';
     el.style.cssText = [
       'position:fixed',
       'bottom:88px',
@@ -423,7 +433,8 @@
 //     "section-paragraph" id ("2-1") that ask_website returns to the agent.
 //   • The registry lets highlight_element scroll to + flash the exact node.
 (() => {
-  if (window.__openCometPageRag) return;   // guard against double injection
+  if (window.__techymindPageRag || window.__openCometPageRag) return;   // guard against double injection
+  window.__techymindPageRag = true;
   window.__openCometPageRag = true;
 
   const registry = new Map();              // id → HTMLElement
@@ -436,7 +447,7 @@
 
   function clearHighlight() {
     if (highlightEl) {
-      highlightEl.style.background = highlightEl.__ocPrevBg || '';
+      highlightEl.style.background = highlightEl.__techymindPrevBg || highlightEl.__ocPrevBg || '';
       highlightEl.style.outline = '';
       highlightEl.style.borderRadius = '';
       highlightEl.style.transition = '';
@@ -456,7 +467,7 @@
 
     for (const element of elements) {
       // Skip invisible nodes and our own overlay markup.
-      if (element.closest('#open-comet-overlay, .open-comet-hiding, #open-comet-redaction-viz')) continue;
+      if (element.closest('#techymind-agent-overlay, #open-comet-agent-overlay, #techymind-redaction-viz, #open-comet-redaction-viz, .techymind-hiding, .open-comet-hiding, [id^="techymind-"], [id^="open-comet-"]')) continue;
       const rect = element.getBoundingClientRect();
       if (rect.width === 0 && rect.height === 0 && !element.offsetParent) continue;
 
@@ -492,7 +503,7 @@
     clearHighlight();
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     highlightEl = el;
-    el.__ocPrevBg = el.style.background || '';
+    el.__techymindPrevBg = el.style.background || '';
     el.style.transition = 'background .25s ease';
     el.style.background = 'rgba(255, 213, 79, 0.35)';
     el.style.outline = '2px solid rgba(255, 179, 0, 0.8)';
@@ -504,13 +515,13 @@
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (!msg || typeof msg.type !== 'string') return;
 
-    if (msg.type === 'OC_EXTRACT_PAGE_PARTS') {
+    if (msg.type === 'TECHYMIND_EXTRACT_PAGE_PARTS' || msg.type === 'OC_EXTRACT_PAGE_PARTS') {
       try { sendResponse({ ok: true, parts: extractParts(), url: location.href }); }
       catch (e) { sendResponse({ ok: false, error: String(e?.message || e) }); }
       return;
     }
 
-    if (msg.type === 'OC_HIGHLIGHT_PART') {
+    if (msg.type === 'TECHYMIND_HIGHLIGHT_PART' || msg.type === 'OC_HIGHLIGHT_PART') {
       sendResponse(highlightById(msg.id));
       return;
     }

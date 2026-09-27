@@ -2,14 +2,15 @@
 // Skills system — reusable agent behaviours from three sources:
 //   1. LIBRARY  — folder-based skills (skills/<id>/SKILL.md, BrowserOS-style),
 //                 loaded via skill-library.js. Primary source.
-//   2. USER     — chrome.storage.local 'opencometSkills' (created in the UI).
+//   2. USER     — chrome.storage.local 'techymindSkills' (created in the UI).
 //   3. FALLBACK — tiny offline set, used only if library files fail to load.
 //
-// Skills are stored in chrome.storage.local under 'opencometSkills'.
+// Skills are stored in chrome.storage.local under 'techymindSkills'.
 
 import { loadLibrarySkills } from './skill-library.js';
 
-const STORAGE_KEY = 'opencometSkills';
+const STORAGE_KEY = 'techymindSkills';
+const LEGACY_STORAGE_KEY = 'opencometSkills';
 
 export const SKILL_CATEGORIES = [
   'Research',
@@ -28,8 +29,7 @@ export const BUILT_IN_SKILLS = [];
 // Storage operations
 
 export async function getAllSkills() {
-  const data = await chrome.storage.local.get(STORAGE_KEY);
-  const userSkills = data[STORAGE_KEY] || [];
+  const userSkills = await getUserSkills();
   const library    = await loadLibrarySkills().catch(() => []);
   const fallback   = library.length ? [] : LEGACY_FALLBACK_SKILLS;
   // Dedupe by id — a user skill may intentionally shadow a library skill.
@@ -44,8 +44,8 @@ export async function getAllSkills() {
 }
 
 export async function getUserSkills() {
-  const data = await chrome.storage.local.get(STORAGE_KEY);
-  return data[STORAGE_KEY] || [];
+  const data = await chrome.storage.local.get([STORAGE_KEY, LEGACY_STORAGE_KEY]);
+  return data[STORAGE_KEY] || data[LEGACY_STORAGE_KEY] || [];
 }
 
 export async function saveSkill(skill) {

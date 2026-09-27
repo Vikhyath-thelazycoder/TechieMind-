@@ -4,6 +4,7 @@
 // Imported and called by the agent loop in sw.js.
 
 import { sleep } from '../lib/utils.js';
+import { getSettings } from '../lib/storage.js';
 import { getAllSkills } from '../lib/skills.js';
 import { searchPageParts, highlightPart } from '../lib/page-rag.js';
 import { findInHistory } from '../lib/vector-history.js';
@@ -37,6 +38,8 @@ export async function executeAction(tabId, action, agentState) {
         ...(getInteractiveContext(action, agentState) || {}),
         x: Number.isFinite(Number(action.x)) ? Number(action.x) : null,
         y: Number.isFinite(Number(action.y)) ? Number(action.y) : null,
+        ordinalIndex: action.ordinalIndex != null ? action.ordinalIndex : (action.index != null ? action.index : null),
+        entity: action.entity || null,
       };
       // Action verification
       // Synthetic clicks on modern SPA players (YouTube etc.) are sometimes
@@ -54,9 +57,16 @@ export async function executeAction(tabId, action, agentState) {
         const rx = Number.isFinite(clickContext.x) ? clickContext.x : (result.rect ? result.rect.x + (result.rect.width || 0) / 2 : null);
         const ry = Number.isFinite(clickContext.y) ? clickContext.y : (result.rect ? result.rect.y + (result.rect.height || 0) / 2 : null);
         if (rx !== null && ry !== null) {
-          chrome.tabs.sendMessage(tabId, { type: 'SHOW_CLICK_RIPPLE', x: rx, y: ry }).catch(() => {});
+          chrome.tabs.sendMessage(tabId, {
+            type: 'TECHYMIND_ACTION_FEEDBACK',
+            actionType: 'click',
+            clickX: rx,
+            clickY: ry,
+            rect: result.rect ? { left: result.rect.x, top: result.rect.y, width: result.rect.w, height: result.rect.h } : null,
+            label: action.selector || action.text || 'Click'
+          }).catch(() => { });
         }
-      } catch {}
+      } catch { }
       await sleep(750);   // let SPA state settle (playback toggles, navigations)
       let after = await inject(tabId, domPageFingerprint);
       // ignore media TIME drift for non-media actions — 750ms of video
@@ -89,10 +99,10 @@ export async function executeAction(tabId, action, agentState) {
             verification = v2;
             after = after2;
             result.trustedRetry = true;
-            console.log('[Open Comet] Click re-dispatched as TRUSTED input (CDP) → PAGE CHANGED');
+            console.log('[TechyMind] Click re-dispatched as TRUSTED input (CDP) → PAGE CHANGED');
           }
         } else if (trusted?.reason) {
-          console.log(`[Open Comet] Trusted-click fallback unavailable: ${trusted.reason}`);
+          console.log(`[TechyMind] Trusted-click fallback unavailable: ${trusted.reason}`);
         }
       }
       // mail/compose success signals — clicking Send closes the compose
@@ -113,16 +123,16 @@ export async function executeAction(tabId, action, agentState) {
                 : `mail success toast detected ("${String(mail.toast || '').slice(0, 40)}")`,
             };
             result.mailSendVerified = true;
-            console.log('[Open Comet] Click verify · mail send signals detected → PAGE CHANGED');
+            console.log('[TechyMind] Click verify · mail send signals detected → PAGE CHANGED');
           }
         } catch { /* additive verification only */ }
       }
       result.changed = verification.changed;
       result.verification = verification;
-      console.log(`[Open Comet] Click verify · target="${String(action.selector || action.text || '').substring(0, 60)}" · matched="${String(result.matchedText || '').substring(0, 60)}"${result.resolution ? ` via ${result.resolution}` : ''}${result.expandedToggle ? ` (expanded "${result.expandedToggle}")` : ''} → ` +
+      console.log(`[TechyMind] Click verify · target="${String(action.selector || action.text || '').substring(0, 60)}" · matched="${String(result.matchedText || '').substring(0, 60)}"${result.resolution ? ` via ${result.resolution}` : ''}${result.expandedToggle ? ` (expanded "${result.expandedToggle}")` : ''} → ` +
         `${verification.changed ? 'PAGE CHANGED' : 'NO VISIBLE CHANGE'} · ${verification.summary}`);
       if (!verification.changed) {
-        console.warn('[Open Comet] Click had no visible effect. Page fingerprint before/after:', before, after);
+        console.warn('[TechyMind] Click had no visible effect. Page fingerprint before/after:', before, after);
       }
       return result;
     }
@@ -190,7 +200,7 @@ export async function executeAction(tabId, action, agentState) {
 
       };
 
-      console.log(`[Open Comet] Media ${cmd} · ${result.matched} → paused=${result.state?.paused} muted=${result.state?.muted} · verified=${mediaChanged ? 'CHANGED' : alreadyInState ? 'ALREADY IN STATE' : 'NO CHANGE'}`);
+      console.log(`[TechyMind] Media ${cmd} · ${result.matched} → paused=${result.state?.paused} muted=${result.state?.muted} · verified=${mediaChanged ? 'CHANGED' : alreadyInState ? 'ALREADY IN STATE' : 'NO CHANGE'}`);
       return result;
     }
 
@@ -207,10 +217,10 @@ export async function executeAction(tabId, action, agentState) {
       // render, and retry once. The failure path also carries a field
       // INVENTORY so the VLM sees what IS on the page.
       if (result && !result.ok && result.needExpand) {
-        console.log(`[Open Comet] Field not found (${String(action.selector).slice(0, 50)}…) — expanding collapsed field group…`);
+        console.log(`[TechyMind] Field not found (${String(action.selector).slice(0, 50)}…) — expanding collapsed field group…`);
         const expanded = await inject(tabId, domExpandToggle, result.tokens || []);
         if (expanded?.ok) {
-          console.log(`[Open Comet] Expanded "${expanded.label}" — retrying type`);
+          console.log(`[TechyMind] Expanded "${expanded.label}" — retrying type`);
           await sleep(450);
           const retry = await inject(tabId, domType, ...buildArgs());
           if (retry) {
@@ -227,9 +237,13 @@ export async function executeAction(tabId, action, agentState) {
       // click), not a silent success.
       if (result.verified === false) {
         result.changed = false;
-        console.warn(`[Open Comet] Type verify · value did NOT stick in field (${result.fieldType})`);
+        console.warn(`[TechyMind] Type verify · value did NOT stick in field (${result.fieldType})`);
       } else if (result.verified === true) {
         result.changed = true;
+      }
+      if (action.pressEnter || action.submit) {
+        await sleep(250);
+        await inject(tabId, domKey, 'Enter');
       }
       return result;
     }
@@ -248,7 +262,7 @@ export async function executeAction(tabId, action, agentState) {
         const nav = await tabNavigationSignal(tabId, before);
         if (nav) verification = nav;
       }
-      console.log(`[Open Comet] Key verify · ${action.key || 'Return'} → ${verification.changed ? 'PAGE CHANGED' : 'no visible change'} · ${verification.summary}`);
+      console.log(`[TechyMind] Key verify · ${action.key || 'Return'} → ${verification.changed ? 'PAGE CHANGED' : 'no visible change'} · ${verification.summary}`);
       return { ok: true, key: action.key, changed: verification.changed, verification };
     }
 
@@ -266,8 +280,29 @@ export async function executeAction(tabId, action, agentState) {
       const verification = diffFingerprints(before, after, { ignoreMediaTime: true });
       result.changed = verification.changed;
       result.verification = verification;
-      console.log(`[Open Comet] Submit verify · ${verification.changed ? 'PAGE CHANGED' : 'NO VISIBLE CHANGE'} · ${verification.summary}`);
+      console.log(`[TechyMind] Submit verify · ${verification.changed ? 'PAGE CHANGED' : 'NO VISIBLE CHANGE'} · ${verification.summary}`);
       return result;
+    }
+
+    // Autofill Form from Stored Profile
+    case 'autofill_form':
+    case 'fill_form': {
+      let prof = action.profileData;
+      if (!prof) {
+        try {
+          const s = await getSettings();
+          prof = s.profileData || {};
+        } catch {
+          prof = {};
+        }
+      }
+      const before = await inject(tabId, domPageFingerprint);
+      const res = await inject(tabId, domAutofillForm, prof);
+      await sleep(400);
+      const after = await inject(tabId, domPageFingerprint);
+      const verification = diffFingerprints(before, after);
+      console.log(`[TechyMind] Autofill Form → ${res?.count || 0} fields populated`);
+      return { ok: true, result: res, changed: (res?.count || 0) > 0, verification };
     }
 
     // Scroll
@@ -340,7 +375,7 @@ export async function executeAction(tabId, action, agentState) {
       if (!targetId) throw new Error('No task tab matched switch_tab target');
       const tab = await chrome.tabs.get(targetId);
       await chrome.tabs.update(targetId, { active: true });
-      try { await chrome.windows.update(tab.windowId, { focused: true }); } catch {}
+      try { await chrome.windows.update(tab.windowId, { focused: true }); } catch { }
       agentState.agentTabId = targetId;
       return { ok: true, tabId: targetId, url: tab.url };
     }
@@ -349,7 +384,7 @@ export async function executeAction(tabId, action, agentState) {
     case 'close_tab': {
       const closeId = resolveTabId(action, agentState) || tabId;
       if (Number.isInteger(closeId) && Array.isArray(agentState.taskTabIds) && agentState.taskTabIds.length
-          && !agentState.taskTabIds.includes(closeId)) {
+        && !agentState.taskTabIds.includes(closeId)) {
         // TAB-GROUP SANDBOX: resolveTabId is already sandbox-bounded;
         // this guard keeps the `|| tabId` fallback from ever escaping it.
         throw new Error('close_tab refused — target tab is outside the task sandbox');
@@ -377,7 +412,7 @@ export async function executeAction(tabId, action, agentState) {
 
     // Bookmark current/other page
     case 'bookmark_add': {
-      const url   = String(action.url || agentState.lastPageInfo?.url || '').trim();
+      const url = String(action.url || agentState.lastPageInfo?.url || '').trim();
       const title = String(action.title || agentState.lastPageInfo?.title || url || 'Untitled').trim();
       if (!/^https?:/i.test(url)) throw new Error('bookmark_add needs a valid http(s) URL');
       const existing = await chrome.bookmarks.search({ url });
@@ -472,7 +507,7 @@ export async function executeAction(tabId, action, agentState) {
         for (const t of candidates) {
           if (agentIds.has(t.id) && t.id === agentState.agentTabId) continue;
           let host = 'other';
-          try { host = new URL(t.url).hostname.replace(/^www\./, ''); } catch {}
+          try { host = new URL(t.url).hostname.replace(/^www\./, ''); } catch { }
           if (!byHost.has(host)) byHost.set(host, []);
           byHost.get(host).push(t.id);
         }
@@ -492,7 +527,7 @@ export async function executeAction(tabId, action, agentState) {
 
     // Reading list
     case 'read_later_add': {
-      const url   = String(action.url || agentState.lastPageInfo?.url || '').trim();
+      const url = String(action.url || agentState.lastPageInfo?.url || '').trim();
       const title = String(action.title || agentState.lastPageInfo?.title || url || 'Untitled').trim();
       if (!/^https?:/i.test(url)) throw new Error('read_later_add needs a valid http(s) URL');
       const list = await getReadingList();
@@ -515,9 +550,9 @@ export async function executeAction(tabId, action, agentState) {
 
     // Page monitor (alarms + notification on change)
     case 'monitor_start': {
-      const url        = String(action.url || agentState.lastPageInfo?.url || '').trim();
+      const url = String(action.url || agentState.lastPageInfo?.url || '').trim();
       const intervalMin = Math.min(240, Math.max(5, Number(action.intervalMin) || 15));
-      const checkText  = String(action.checkText || '').trim();
+      const checkText = String(action.checkText || '').trim();
       if (!/^https?:/i.test(url)) throw new Error('monitor_start needs a valid http(s) URL');
 
       const monitors = await getMonitors();
@@ -526,7 +561,7 @@ export async function executeAction(tabId, action, agentState) {
       monitors.set(id, monitor);
       await saveMonitors(monitors);
 
-      await chrome.alarms.create(`opencomet_monitor_${id}`, { periodInMinutes: intervalMin });
+      await chrome.alarms.create(`techymind_monitor_${id}`, { periodInMinutes: intervalMin });
 
       // Capture the baseline immediately so the first alarm can diff against it
       try {
@@ -572,7 +607,7 @@ export async function executeAction(tabId, action, agentState) {
         .slice(0, 25)
         .map(t => {
           let host = '';
-          try { host = new URL(t.url).hostname.replace(/^www\./, ''); } catch {}
+          try { host = new URL(t.url).hostname.replace(/^www\./, ''); } catch { }
           return { id: t.id, host, title: String(t.title || '').substring(0, 80), url: String(t.url || '').substring(0, 120), active: Boolean(t.active) };
         });
       const inSandbox = sandboxTabs.some(t => t.id === tabId);
@@ -641,9 +676,9 @@ export async function executeAction(tabId, action, agentState) {
 async function ensureAgentBookmarkFolder() {
   const tree = await chrome.bookmarks.getTree();
   const root = tree?.[0]?.children?.find(c => !c.url) || tree?.[0]; // "Other bookmarks" usually
-  const existing = (root.children || []).find(c => c.title === 'Open Comet' && !c.url);
+  const existing = (root.children || []).find(c => c.title === 'TechyMind' && !c.url);
   if (existing) return existing;
-  return chrome.bookmarks.create({ parentId: root.id, title: 'Open Comet' });
+  return chrome.bookmarks.create({ parentId: root.id, title: 'TechyMind' });
 }
 
 function normalizeTabUrl(url) {
@@ -722,9 +757,9 @@ async function resolveSkill(requested) {
   try {
     const all = await getAllSkills();
     return all.find(s => s.id.toLowerCase() === needle)
-        || all.find(s => s.id.toLowerCase().includes(needle))
-        || all.find(s => s.name.toLowerCase().includes(needle))
-        || null;
+      || all.find(s => s.id.toLowerCase().includes(needle))
+      || all.find(s => s.name.toLowerCase().includes(needle))
+      || null;
   } catch {
     return null;
   }
@@ -737,7 +772,7 @@ async function inject(tabId, fn, ...args) {
     const results = await chrome.scripting.executeScript({ target: { tabId }, func: fn, args });
     return results?.[0]?.result ?? null;
   } catch (e) {
-    console.warn('[Open Comet] Injection failed:', e.message);
+    console.warn('[TechyMind] Injection failed:', e.message);
     return null;
   }
 }
@@ -753,10 +788,10 @@ async function inject(tabId, fn, ...args) {
 async function executeClickWithExpansion(tabId, sel, context) {
   let result = await inject(tabId, domClick, sel, context);
   if (result?.ok || !result?.needExpand) return result;
-  console.log(`[Open Comet] Field not found (${String(sel).slice(0, 50)}…) — expanding collapsed field group…`);
+  console.log(`[TechyMind] Field not found (${String(sel).slice(0, 50)}…) — expanding collapsed field group…`);
   const expanded = await inject(tabId, domExpandToggle, result.tokens || []);
   if (!expanded?.ok) return result;
-  console.log(`[Open Comet] Expanded "${expanded.label}" — retrying click`);
+  console.log(`[TechyMind] Expanded "${expanded.label}" — retrying click`);
   await sleep(450);
   const retry = await inject(tabId, domClick, sel, context);
   if (retry?.ok) retry.expandedToggle = expanded.label;
@@ -806,13 +841,13 @@ async function trustedClick(tabId, rect) {
 function resolveTabId(action, agentState) {
   if (Number.isInteger(action.tabId) && agentState.taskTabIds.includes(action.tabId)) return action.tabId;
   const graph = agentState.taskTabGraph;
-  const wantHost  = String(action.host  || '').toLowerCase();
+  const wantHost = String(action.host || '').toLowerCase();
   const wantTitle = String(action.title || '').toLowerCase();
-  const wantUrl   = String(action.url   || '').toLowerCase();
+  const wantUrl = String(action.url || '').toLowerCase();
   return Object.values(graph).find(tab =>
-    (wantHost  && tab.host?.includes(wantHost)) ||
+    (wantHost && tab.host?.includes(wantHost)) ||
     (wantTitle && tab.title?.toLowerCase().includes(wantTitle)) ||
-    (wantUrl   && tab.url?.toLowerCase().includes(wantUrl))
+    (wantUrl && tab.url?.toLowerCase().includes(wantUrl))
   )?.id ?? null;
 }
 
@@ -938,7 +973,7 @@ function verifyMailSendOutcome() {
     toast = [...document.querySelectorAll('[aria-live="polite"], [role=status], [aria-live="assertive"]')]
       .map(t => String(t.textContent || '').replace(/\s+/g, ' ').trim())
       .filter(Boolean).join(' | ').slice(0, 120);
-  } catch {}
+  } catch { }
   const sent = /\b(message sent|mail sent|sending)\b/i.test(toast);
   return { composeClosed: !composeOpen, sent, toast };
 }
@@ -979,7 +1014,7 @@ function domPageFingerprint() {
   }
   function visibleContentSig() {
     const agentOwned = el => {
-      try { return !!(el && el.closest && el.closest('[id^="open-comet-"]')); } catch { return false; }
+      try { return !!(el && el.closest && el.closest('[id^="techymind-"], [id^="open-comet-"]')); } catch { return false; }
     };
     try {
       const parts = [];
@@ -1031,7 +1066,7 @@ function domPageFingerprint() {
 
   // structural fingerprint
   const agentOwned = el => {
-    try { return !!(el && el.closest && el.closest('#open-comet-agent-overlay,#open-comet-redaction-viz,[id^="open-comet-"]')); }
+    try { return !!(el && el.closest && el.closest('#techymind-agent-overlay, #open-comet-agent-overlay, #techymind-redaction-viz, #open-comet-redaction-viz, [id^="techymind-"], [id^="open-comet-"]')); }
     catch { return false; }
   };
   const vis = el => {
@@ -1101,7 +1136,7 @@ async function tabNavigationSignal(tabId, before) {
     const what = urlChanged
       ? `url ${String(before.url || '').slice(0, 48)} → ${String(tab.url || '').slice(0, 48)}`
       : `title "${String(before.title || '').slice(0, 30)}" → "${String(tab.title || '').slice(0, 30)}"`;
-    console.log(`[Open Comet] Verify · tab-level navigation signal → PAGE CHANGED · ${what}`);
+    console.log(`[TechyMind] Verify · tab-level navigation signal → PAGE CHANGED · ${what}`);
     return { changed: true, summary: `navigated (${what}) — read from the tab, post-action fingerprint unavailable`, tabLevel: true };
   } catch {
     return null;   // tab gone — keep the honest no-change verdict
@@ -1161,7 +1196,7 @@ function diffFingerprints(before, after, opts = {}) {
   // media does not change visible text — so ignoreMediaTime semantics hold.
   let contentChanged = false;
   if ((before.contentSig || '') !== '' && (after.contentSig || '') !== '' &&
-      before.contentSig !== after.contentSig) {
+    before.contentSig !== after.contentSig) {
     contentChanged = true; changed = true; parts.push('content changed');
   }
   const bc = before.controls || {}, ac = after.controls || {};
@@ -1200,10 +1235,10 @@ function domMediaControl(command) {
   try {
     switch (command) {
       case 'pause': target.pause(); break;
-      case 'play': { const p = target.play(); if (p?.catch) p.catch(() => {}); break; }
+      case 'play': { const p = target.play(); if (p?.catch) p.catch(() => { }); break; }
       case 'mute': target.muted = true; break;
       case 'unmute': target.muted = false; break;
-      case 'toggle': target.paused ? target.play()?.catch?.(() => {}) : target.pause(); break;
+      case 'toggle': target.paused ? target.play()?.catch?.(() => { }) : target.pause(); break;
     }
   } catch (e) {
     return { ok: false, reason: `Media ${command} threw: ${e?.message || e}` };
@@ -1219,16 +1254,16 @@ function domMediaControl(command) {
   };
 }
 
-function domClick(sel, context = null) {
+async function domClick(sel, context = null) {
   // shared helpers (self-contained — this function is serialized)
   const escAttr = v => String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  const norm    = v => String(v || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const norm = v => String(v || '').replace(/\s+/g, ' ').trim().toLowerCase();
   // NEVER match the extension's own injected UI. Field-log proof: the
   // overlay's status line echoes the current action description, so the old
   // generic text scan matched IT and the agent clicked ITSELF for 17 steps
   // (matched="click \"the to field in the new message window\"").
   const agentOwned = el => {
-    try { return !!(el && el.closest && el.closest('#open-comet-agent-overlay,#open-comet-redaction-viz,[id^="open-comet-"]')); }
+    try { return !!(el && el.closest && el.closest('#techymind-agent-overlay, #open-comet-agent-overlay, #techymind-redaction-viz, #open-comet-redaction-viz, [id^="techymind-"], [id^="open-comet-"]')); }
     catch { return false; }
   };
   const visible = el => {
@@ -1340,11 +1375,29 @@ function domClick(sel, context = null) {
     } catch { return ''; }
   };
 
-  const press = target => {
+  const press = async target => {
     target.scrollIntoView({ block: 'center', inline: 'center' });
     const r = target.getBoundingClientRect();
     const clientX = r.left + Math.min(r.width - 2, Math.max(2, r.width / 2));
     const clientY = r.top + Math.min(r.height - 2, Math.max(2, r.height / 2));
+
+    // Phase 1 Visual Agency: glide AI cursor & highlight target element
+    try {
+      const vo = window.__techymindVisualOverlay || window.__opencometVisualOverlay;
+      if (vo && typeof vo.handleTargetAction === 'function') {
+        vo.handleTargetAction({
+          rect: { left: r.left, top: r.top, width: r.width, height: r.height },
+          clickX: clientX,
+          clickY: clientY,
+          actionType: 'click',
+          label: label(target) || sel || 'Click'
+        });
+      }
+    } catch (_) { }
+
+    // Visual Agency Glide Delay: Allow cursor glide and bracket lock to render clearly
+    await new Promise(res => setTimeout(res, 200));
+
     ['pointerover', 'mouseover', 'mouseenter', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(type =>
       target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX, clientY }))
     );
@@ -1407,7 +1460,7 @@ function domClick(sel, context = null) {
     let agentRoots = null;
     const containsAgentUI = el => {
       try {
-        if (!agentRoots) agentRoots = [...document.querySelectorAll('[id^="open-comet-"]')];
+        if (!agentRoots) agentRoots = [...document.querySelectorAll('[id^="techymind-"], [id^="open-comet-"]')];
         return agentRoots.some(rt => rt !== el && el.contains(rt));
       } catch { return false; }
     };
@@ -1450,13 +1503,13 @@ function domClick(sel, context = null) {
   const byUid = uidValue => {
     const want = String(uidValue || '').trim();
     if (!want) return null;
-    const registry = window.__openCometElRegistry;
+    const registry = window.__techymindElRegistry || window.__openCometElRegistry;
     const registered = registry && typeof registry.get === 'function' ? registry.get(want) : null;
     if (registered && registered.isConnected) return registered;
     let hit = null;
     eachRoot(root => {
       if (hit) return;
-      try { hit = root.querySelector(`[data-opencomet-agent-uid="${escAttr(want)}"]`) || null; } catch { hit = null; }
+      try { hit = root.querySelector(`[data-techymind-agent-uid="${escAttr(want)}"], [data-opencomet-agent-uid="${escAttr(want)}"]`) || null; } catch { hit = null; }
     });
     return hit;
   };
@@ -1580,9 +1633,36 @@ function domClick(sel, context = null) {
       if (element) resolution = 'text';
     } else {
       try {
-        const q = document.querySelector(sel);
-        if (q && visible(q)) { element = q; resolution = 'css'; }
-      } catch {}
+        if (context?.ordinalIndex != null) {
+          const ordIdx = Number(context.ordinalIndex);
+          const inNavOrHeader = el => {
+            try {
+              return Boolean(el.closest && el.closest('header, nav, footer, [role="navigation"], [role="banner"], [role="contentinfo"], #navbar, #nav-main, #nav-belt, #nav-subnav, #header, #footer, .site-header, .site-footer'));
+            } catch { return false; }
+          };
+          let all = Array.from(document.querySelectorAll(sel)).filter(el => visible(el) && !inNavOrHeader(el));
+          if (!all.length) {
+            all = Array.from(document.querySelectorAll(sel)).filter(visible);
+          }
+          all = all.sort((a, b) => {
+            if (typeof a.getBoundingClientRect !== 'function' || typeof b.getBoundingClientRect !== 'function') return 0;
+            const ra = a.getBoundingClientRect();
+            const rb = b.getBoundingClientRect();
+            const vertDiff = (ra?.top || 0) - (rb?.top || 0);
+            if (Math.abs(vertDiff) > 15) return vertDiff;
+            return (ra?.left || 0) - (rb?.left || 0);
+          });
+          const idx = ordIdx === -1 ? all.length - 1 : (ordIdx >= 1 ? ordIdx - 1 : ordIdx);
+          if (idx >= 0 && idx < all.length) {
+            element = all[idx];
+            resolution = 'ordinal-css';
+          }
+        }
+        if (!element) {
+          const q = document.querySelector(sel);
+          if (q && visible(q)) { element = q; resolution = 'css'; }
+        }
+      } catch { }
       if (!element) {
         // VLMs quote the on-screen label — "the blue 'Send' button" —
         // try that quoted span as exact text before anything else.
@@ -1651,7 +1731,7 @@ function domClick(sel, context = null) {
     target = clickableAncestor(fallback);
   }
 
-  rect = press(target);
+  rect = await press(target);
 
   // DISAMBIGUATION RECEIPT — proof of WHICH control fired
   // For repeated tags the result carries the same receipt the inventory
@@ -1695,7 +1775,7 @@ function domClick(sel, context = null) {
 function domExpandToggle(tokens = []) {
   const norm = v => String(v || '').replace(/\s+/g, ' ').trim().toLowerCase();
   const agentOwned = el => {
-    try { return !!(el && el.closest && el.closest('#open-comet-agent-overlay,#open-comet-redaction-viz,[id^="open-comet-"]')); }
+    try { return !!(el && el.closest && el.closest('#techymind-agent-overlay, #open-comet-agent-overlay, #techymind-redaction-viz, #open-comet-redaction-viz, [id^="techymind-"], [id^="open-comet-"]')); }
     catch { return false; }
   };
   const visible = el => {
@@ -1762,9 +1842,10 @@ function domExpandToggle(tokens = []) {
 // fails. The fix is to use document.execCommand('insertText') which routes
 // through the browser's native editing pipeline, keeping editor state intact.
 //
-function domType(sel, val, context = null) {
-  const norm    = v => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+async function domType(sel, val, context = null) {
+  const norm = v => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   const visible = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const sleepMs = ms => new Promise(res => setTimeout(res, ms));
   const queryDomPath = domPath => {
     const path = String(domPath || '').trim();
     if (!path) return null;
@@ -1803,7 +1884,7 @@ function domType(sel, val, context = null) {
   const resolveUid = uidValue => {
     const want = String(uidValue || '').trim();
     if (!want) return null;
-    const registry = window.__openCometElRegistry;
+    const registry = window.__techymindElRegistry || window.__openCometElRegistry;
     const registered = registry && typeof registry.get === 'function' ? registry.get(want) : null;
     if (registered && registered.isConnected) return registered;
     const roots = [document];
@@ -1812,7 +1893,7 @@ function domType(sel, val, context = null) {
     }
     for (const root of roots) {
       try {
-        const el = root.querySelector(`[data-opencomet-agent-uid="${escAttr(want)}"]`);
+        const el = root.querySelector(`[data-techymind-agent-uid="${escAttr(want)}"], [data-opencomet-agent-uid="${escAttr(want)}"]`);
         if (el) return el;
       } catch { /* invalid selector */ }
     }
@@ -1867,7 +1948,7 @@ function domType(sel, val, context = null) {
       norm(el.placeholder || el.getAttribute?.('aria-label') || '').includes(txt)
     ) || null;
   } else if (!element) {
-    try { element = document.querySelector(sel); } catch {}
+    try { element = document.querySelector(sel); } catch { }
     if (element && (!isEditable(element) || !visible(element))) element = null;
   }
 
@@ -2020,6 +2101,30 @@ function domType(sel, val, context = null) {
   element.scrollIntoView({ block: 'center' });
   element.focus();
 
+  const r = element.getBoundingClientRect();
+  const fieldType = String(element.type || element.tagName || '').toLowerCase();
+  const fieldSensitive = fieldType === 'password'
+    || /\b(otp|cvv|cvc|csc|ssn|aadhaar|pin)\b/i.test(String(element.getAttribute?.('autocomplete') || ''))
+    || /(password|passwd|otp|cvv|cvc|csc|secret)/i.test(String(element.name || '') + String(element.id || ''));
+
+  // Phase 1 Visual Agency: glide AI cursor & highlight input target bracket
+  try {
+    const vo = window.__techymindVisualOverlay || window.__opencometVisualOverlay;
+    if (vo && typeof vo.handleTargetAction === 'function') {
+      vo.handleTargetAction({
+        rect: { left: r.left, top: r.top, width: r.width, height: r.height },
+        clickX: r.left + Math.min(24, Math.max(4, r.width / 4)),
+        clickY: r.top + r.height / 2,
+        actionType: 'type',
+        sensitive: fieldSensitive,
+        label: fieldSensitive ? 'PII Protected Field' : (sel ? `Type: ${String(sel).slice(0, 30)}` : 'Input Field')
+      });
+    }
+  } catch (_) { }
+
+  // Visual Agency Glide Delay: Allow cursor glide and bracket lock to render clearly
+  await new Promise(res => setTimeout(res, 180));
+
   // Branch A: contenteditable (Gmail compose, Outlook, Slack, Notion…)
   const isContentEditable =
     element.isContentEditable ||
@@ -2053,9 +2158,23 @@ function domType(sel, val, context = null) {
     // execCommand('insertText') fires through the browser's native editing
     // pipeline — React, Vue, and Gmail's own editor all see it as real input.
     let typed = false;
-    try {
-      typed = document.execCommand('insertText', false, val);
-    } catch (_) {}
+    const valStr = String(val ?? '');
+    if (isEmpty && valStr.length > 0 && valStr.length <= 45 && typeof document.execCommand === 'function') {
+      try {
+        for (let i = 0; i < valStr.length; i++) {
+          document.execCommand('insertText', false, valStr[i]);
+          const jitter = 14 + Math.floor(Math.random() * 15);
+          await sleepMs(jitter);
+        }
+        typed = true;
+      } catch (_) {
+        typed = false;
+      }
+    } else {
+      try {
+        typed = document.execCommand('insertText', false, val);
+      } catch (_) { }
+    }
 
     if (!typed) {
       // Fallback: for empty elements only, clear and inject textNode + InputEvent
@@ -2084,7 +2203,7 @@ function domType(sel, val, context = null) {
     }
 
     // Generic listeners
-    element.dispatchEvent(new Event('input',  { bubbles: true }));
+    element.dispatchEvent(new Event('input', { bubbles: true }));
     element.dispatchEvent(new Event('change', { bubbles: true }));
 
     // Always move caret to end after insert
@@ -2097,31 +2216,97 @@ function domType(sel, val, context = null) {
         ws2.removeAllRanges();
         ws2.addRange(r2);
       }
-    } catch (_) {}
+    } catch (_) { }
 
     // report field metadata so the loop can mask typed
     // secrets in history before they reach the next prompt.
-    return { ok: true, method: 'contenteditable', appended: !isEmpty,
-      fieldType: 'contenteditable', fieldSensitive: false, verified: true };
+    return {
+      ok: true, method: 'contenteditable', appended: !isEmpty,
+      fieldType: 'contenteditable', fieldSensitive: false, verified: true
+    };
   }
 
   // Branch B: standard <input> / <textarea>
-  const proto  = element.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-  const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-  if (setter) setter.call(element, val);
-  else if ('value' in element) element.value = val;
-  else element.textContent = val;
+  try {
+    element.focus();
+    element.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+    element.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+  } catch (_) { }
 
-  element.dispatchEvent(new Event('input',  { bubbles: true }));
-  element.dispatchEvent(new Event('change', { bubbles: true }));
+  try {
+    element.dispatchEvent(new InputEvent('beforeinput', {
+      bubbles: true,
+      cancelable: true,
+      inputType: 'insertText',
+      data: String(val),
+    }));
+  } catch (_) { }
+
+  const proto = element.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+  const valStr = String(val ?? '');
+
+  // Natural human typing cadence (15ms - 28ms jitter) for short/medium queries & fields
+  if (valStr.length > 0 && valStr.length <= 45) {
+    let accum = '';
+    for (let i = 0; i < valStr.length; i++) {
+      const ch = valStr[i];
+      accum += ch;
+      try {
+        element.dispatchEvent(new KeyboardEvent('keydown', { key: ch, bubbles: true }));
+        element.dispatchEvent(new InputEvent('beforeinput', {
+          bubbles: true,
+          cancelable: true,
+          inputType: 'insertText',
+          data: ch,
+        }));
+      } catch (_) { }
+
+      if (setter) setter.call(element, accum);
+      else if ('value' in element) element.value = accum;
+      else element.textContent = accum;
+
+      try {
+        element.dispatchEvent(new InputEvent('input', {
+          bubbles: true,
+          cancelable: true,
+          inputType: 'insertText',
+          data: ch,
+        }));
+        element.dispatchEvent(new KeyboardEvent('keyup', { key: ch, bubbles: true }));
+      } catch (_) { }
+
+      const jitter = 14 + Math.floor(Math.random() * 15);
+      await sleepMs(jitter);
+    }
+    element.dispatchEvent(new Event('change', { bubbles: true }));
+  } else {
+    // Fast path for long inputs/text
+    if (setter) setter.call(element, val);
+    else if ('value' in element) element.value = val;
+    else element.textContent = val;
+
+    try {
+      element.dispatchEvent(new InputEvent('input', {
+        bubbles: true,
+        cancelable: true,
+        inputType: 'insertText',
+        data: String(val),
+      }));
+    } catch (_) {
+      element.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    element.dispatchEvent(new Event('change', { bubbles: true }));
+
+    try {
+      element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Unidentified', bubbles: true }));
+      element.dispatchEvent(new KeyboardEvent('keyup', { key: 'Unidentified', bubbles: true }));
+    } catch (_) { }
+  }
 
   // READ-BACK VERIFICATION — the old code reported ok without
   // checking the value landed. React-controlled fields can silently revert;
   // the VLM then built on a field it believed was filled.
-  const fieldType = String(element.type || element.tagName || '').toLowerCase();
-  const fieldSensitive = fieldType === 'password'
-    || /\b(otp|cvv|cvc|csc|ssn|aadhaar|pin)\b/i.test(String(element.getAttribute?.('autocomplete') || ''))
-    || /(password|passwd|otp|cvv|cvc|csc|secret)/i.test(String(element.name || '') + String(element.id || ''));
   let verified;
   try {
     const cur = String(element.value ?? element.textContent ?? '');
@@ -2177,9 +2362,117 @@ function domKey(key) {
   return { ok: true, key: raw, resolved: { key: main, modifiers: [...mods] } };
 }
 
+async function domAutofillForm(profileData) {
+  const sleepMs = ms => new Promise(res => setTimeout(res, ms));
+  const visible = el => {
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 && r.height === 0 && el.offsetParent === null) return false;
+    const s = window.getComputedStyle(el);
+    return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+  };
+
+  const FIELD_RULES = [
+    { key: 'email', isSensitive: true, types: ['email'], tokens: ['email'], re: /\b(e-?mail|email\s*address)\b/i },
+    { key: 'phone', isSensitive: true, types: ['tel'], tokens: ['tel', 'mobile'], re: /\b(phone|mobile|tel|contact\s*no|contact\s*number|cell)\b/i },
+    { key: 'pincode', isSensitive: true, types: [], tokens: ['postal-code', 'zip', 'postcode'], re: /\b(pin\s*code|pincode|postal\s*code|postal|zip)\b/i },
+    { key: 'city', isSensitive: false, types: [], tokens: ['address-level2', 'city'], re: /\b(city|district|town)\b/i },
+    { key: 'state', isSensitive: false, types: [], tokens: ['address-level1', 'state'], re: /\b(state|province|region)\b/i },
+    { key: 'country', isSensitive: false, types: [], tokens: ['country', 'country-name'], re: /\b(country|nation)\b/i },
+    { key: 'address', isSensitive: true, types: [], tokens: ['street-address', 'address-line1', 'address'], re: /\b(address|street|flat|house|building|locality|road)\b/i },
+    { key: 'fullName', isSensitive: false, types: [], tokens: ['name', 'given-name'], re: /\b(full\s*name|your\s*name|first\s*name|recipient|customer\s*name)\b/i },
+    { key: 'company', isSensitive: false, types: [], tokens: ['organization', 'company'], re: /\b(company|organization|workplace)\b/i },
+  ];
+
+  const editables = Array.from(document.querySelectorAll('input, textarea, select')).filter(visible);
+  const filled = [];
+  const seenKeys = new Set();
+
+  for (const el of editables) {
+    const tagName = el.tagName.toUpperCase();
+    const type = String(el.type || 'text').toLowerCase();
+    if (['hidden', 'submit', 'button', 'checkbox', 'radio', 'file', 'image', 'reset'].includes(type) || el.readOnly || el.disabled) continue;
+
+    const autocomplete = String(el.getAttribute('autocomplete') || '').toLowerCase();
+    const parts = [
+      autocomplete, type, el.name, el.id, el.placeholder, el.getAttribute('aria-label') || '',
+      el.getAttribute('title') || ''
+    ];
+    if (el.id) {
+      const lbl = document.querySelector(`label[for="${el.id}"]`);
+      if (lbl) parts.push(lbl.textContent || '');
+    }
+    const parentLbl = el.closest('label');
+    if (parentLbl) parts.push(parentLbl.textContent || '');
+    const blob = parts.join(' ').toLowerCase();
+
+    for (const rule of FIELD_RULES) {
+      if (seenKeys.has(rule.key) && rule.key !== 'address') continue;
+
+      const matches = (autocomplete && rule.tokens.some(t => autocomplete.includes(t)))
+        || rule.types.includes(type)
+        || rule.re.test(blob);
+
+      if (matches) {
+        const val = profileData[rule.key];
+        if (val && String(val).trim()) {
+          seenKeys.add(rule.key);
+
+          el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          await sleepMs(80);
+          el.focus();
+
+          const r = el.getBoundingClientRect();
+          const vo = window.__techymindVisualOverlay || window.__opencometVisualOverlay;
+          if (vo && typeof vo.handleTargetAction === 'function') {
+            vo.handleTargetAction({
+              rect: { left: r.left, top: r.top, width: r.width, height: r.height },
+              clickX: r.left + Math.min(24, Math.max(4, r.width / 4)),
+              clickY: r.top + r.height / 2,
+              actionType: 'type',
+              sensitive: rule.isSensitive,
+              label: rule.isSensitive ? `Protected PII: ${rule.key}` : `Autofill: ${rule.key}`
+            });
+          }
+
+          const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+          const valStr = String(val).trim();
+
+          for (let i = 0; i < valStr.length; i++) {
+            const ch = valStr[i];
+            el.dispatchEvent(new KeyboardEvent('keydown', { key: ch, bubbles: true }));
+            el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: ch }));
+            const currentSub = valStr.slice(0, i + 1);
+            if (setter) setter.call(el, currentSub);
+            else el.value = currentSub;
+            el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ch }));
+            el.dispatchEvent(new KeyboardEvent('keyup', { key: ch, bubbles: true }));
+            await sleepMs(10 + Math.floor(Math.random() * 10));
+          }
+
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+          await sleepMs(60);
+
+          filled.push({
+            fieldKey: rule.key,
+            tagName: el.tagName,
+            isSensitive: rule.isSensitive,
+            maskedValue: rule.isSensitive ? '••••••••' : valStr,
+          });
+          break;
+        }
+      }
+    }
+  }
+
+  return { ok: true, filled, count: filled.length };
+}
+
 function domSubmit(sel) {
   let target = null;
-  if (sel) { try { target = document.querySelector(sel); } catch {} }
+  if (sel) { try { target = document.querySelector(sel); } catch { } }
   const form = target?.closest?.('form') || document.activeElement?.closest?.('form') || document.querySelector('form');
   if (!form) return { ok: false, reason: 'No form found' };
   form.requestSubmit ? form.requestSubmit() : form.submit();
@@ -2199,27 +2492,27 @@ function domScroll(dir, px) {
     })
     .map(el => {
       const rect = el.getBoundingClientRect();
-      return { el, area: Math.max(0,Math.min(rect.width,innerWidth)) * Math.max(0,Math.min(rect.height,innerHeight)) };
+      return { el, area: Math.max(0, Math.min(rect.width, innerWidth)) * Math.max(0, Math.min(rect.height, innerHeight)) };
     })
     .sort((a, b) => b.area - a.area);
 
   const scroller = candidates[0]?.el || document.scrollingElement || document.documentElement;
-  const isDoc    = scroller === document.body || scroller === document.documentElement || scroller === document.scrollingElement;
-  const before   = isDoc ? scrollY : scroller.scrollTop;
-  const amount   = Math.max(200, px || 600);
-  const target   = dir === 'bottom' ? scroller.scrollHeight : dir === 'top' ? 0 : before + (dir === 'up' ? -amount : amount);
+  const isDoc = scroller === document.body || scroller === document.documentElement || scroller === document.scrollingElement;
+  const before = isDoc ? scrollY : scroller.scrollTop;
+  const amount = Math.max(200, px || 600);
+  const target = dir === 'bottom' ? scroller.scrollHeight : dir === 'top' ? 0 : before + (dir === 'up' ? -amount : amount);
 
   if (isDoc) window.scrollTo({ top: target, behavior: 'auto' });
   else scroller.scrollTop = target;
 
-  const after  = isDoc ? scrollY : scroller.scrollTop;
+  const after = isDoc ? scrollY : scroller.scrollTop;
   const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
   return {
     ok: true, before, after,
-    moved:    Math.abs(after - before),
-    atTop:    after <= 4,
+    moved: Math.abs(after - before),
+    atTop: after <= 4,
     atBottom: after >= maxTop - 4,
-    target:   isDoc ? 'document' : (scroller.tagName.toLowerCase() + (scroller.id ? '#' + scroller.id : '')),
+    target: isDoc ? 'document' : (scroller.tagName.toLowerCase() + (scroller.id ? '#' + scroller.id : '')),
   };
 }
 
@@ -2227,7 +2520,7 @@ function domScrollToUid(uid) {
   const escAttr = v => String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   // registry first (shadow-root content), then the uid attribute across
   // accessible frames — same relocation order as domClick/domType
-  const registry = window.__openCometElRegistry;
+  const registry = window.__techymindElRegistry || window.__openCometElRegistry;
   let el = registry && typeof registry.get === 'function' ? registry.get(String(uid || '').trim()) : null;
   if (el && !el.isConnected) el = null;
   if (!el) {
@@ -2237,7 +2530,7 @@ function domScrollToUid(uid) {
     }
     for (const root of roots) {
       try {
-        el = root.querySelector('[data-opencomet-agent-uid="' + escAttr(uid) + '"]');
+        el = root.querySelector('[data-techymind-agent-uid="' + escAttr(uid) + '"], [data-opencomet-agent-uid="' + escAttr(uid) + '"]');
         if (el) break;
       } catch { /* invalid uid */ }
     }
@@ -2300,7 +2593,7 @@ async function domSearch(query, context = null) {
     if (el.isContentEditable || el.getAttribute?.('contenteditable') === 'true' || el.getAttribute?.('contenteditable') === '') {
       el.focus();
       document.execCommand?.('selectAll', false);
-      try { document.execCommand?.('insertText', false, value); } catch {}
+      try { document.execCommand?.('insertText', false, value); } catch { }
       if (!el.textContent?.includes(value)) el.textContent = value;
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
@@ -2321,9 +2614,9 @@ async function domSearch(query, context = null) {
     const uid = selector.startsWith('uid:') ? selector.slice(4) : '';
     let candidate = null;
     if (uid) {
-      candidate = document.querySelector('[data-opencomet-agent-uid="' + uid.replace(/"/g, '\\"') + '"]');
+      candidate = document.querySelector('[data-techymind-agent-uid="' + uid.replace(/"/g, '\\"') + '"], [data-opencomet-agent-uid="' + uid.replace(/"/g, '\\"') + '"]');
     } else {
-      try { candidate = document.querySelector(selector); } catch {}
+      try { candidate = document.querySelector(selector); } catch { }
     }
     if (visible(candidate)) {
       searchEl = candidate;
@@ -2358,9 +2651,9 @@ async function domSearch(query, context = null) {
   const form = searchEl.closest('form');
   const submitButton = form?.querySelector('button[type=submit], input[type=submit], button[aria-label*=search i], button[title*=search i], #search-icon-legacy') || null;
 
-  searchEl.dispatchEvent(new KeyboardEvent('keydown',  { key: 'Enter', code: 'Enter', bubbles: true }));
+  searchEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
   searchEl.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', bubbles: true }));
-  searchEl.dispatchEvent(new KeyboardEvent('keyup',    { key: 'Enter', code: 'Enter', bubbles: true }));
+  searchEl.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
 
   if (submitButton && typeof submitButton.click === 'function') {
     submitButton.click();
@@ -2376,38 +2669,40 @@ async function domSearch(query, context = null) {
 
 export function describeAction(action) {
   const map = {
-    navigate:       () => 'Navigate → ' + action.url,
-    click:          () => 'Click "' + (action.selector || action.text) + '"',
-    type:           () => 'Type "' + String(action.text || action.value || '').substring(0, 40) + '" into ' + action.selector,
-    fill:           () => 'Fill "' + action.selector + '" ← "' + String(action.text || action.value || '').substring(0, 30) + '"',
-    scroll:         () => 'Scroll ' + action.direction + ' ' + (action.amount || 600) + 'px',
-    scroll_to_uid:  () => 'Scroll to uid:' + (action.uid || action.selector),
+    navigate: () => 'Navigate → ' + action.url,
+    click: () => 'Click "' + (action.selector || action.text) + '"',
+    type: () => 'Type "' + String(action.text || action.value || '').substring(0, 40) + '" into ' + action.selector,
+    fill: () => 'Fill "' + action.selector + '" ← "' + String(action.text || action.value || '').substring(0, 30) + '"',
+    scroll: () => 'Scroll ' + action.direction + ' ' + (action.amount || 600) + 'px',
+    scroll_to_uid: () => 'Scroll to uid:' + (action.uid || action.selector),
     scroll_to_text: () => 'Scroll to "' + (action.text || action.selector) + '"',
-    search:         () => 'Search "' + action.query + '"',
-    press_key:      () => 'Press ' + action.key,
-    key:            () => 'Press ' + action.key,
-    submit:         () => 'Submit form',
-    media:          () => 'Media ' + (action.command || 'pause') + ' (direct playback control)',
-    media_control:  () => 'Media ' + (action.command || 'pause') + ' (direct playback control)',
-    wait:           () => 'Wait ' + ((action.ms || 2000) / 1000) + 's',
-    extract:        () => 'Extract "' + action.selector + '"',
-    new_tab:        () => 'New tab → ' + (action.url || ''),
-    switch_tab:     () => 'Switch tab → ' + (action.host || action.title || ''),
-    close_tab:      () => 'Close tab ' + (action.host || ''),
-    bookmark_add:   () => 'Bookmark "' + (action.title || action.url || 'current page') + '"',
-    bookmark_search:() => 'Search bookmarks "' + (action.query || '') + '"',
-    save_page:      () => 'Save page as MHTML archive',
-    screenshot_save:() => 'Save screenshot "' + (action.label || '') + '"',
-    organize_tabs:  () => 'Organize tabs (' + (action.mode || 'group') + ')',
+    search: () => 'Search "' + action.query + '"',
+    press_key: () => 'Press ' + action.key,
+    key: () => 'Press ' + action.key,
+    submit: () => 'Submit form',
+    media: () => 'Media ' + (action.command || 'pause') + ' (direct playback control)',
+    media_control: () => 'Media ' + (action.command || 'pause') + ' (direct playback control)',
+    wait: () => 'Wait ' + ((action.ms || 2000) / 1000) + 's',
+    extract: () => 'Extract "' + action.selector + '"',
+    new_tab: () => 'New tab → ' + (action.url || ''),
+    switch_tab: () => 'Switch tab → ' + (action.host || action.title || ''),
+    close_tab: () => 'Close tab ' + (action.host || ''),
+    bookmark_add: () => 'Bookmark "' + (action.title || action.url || 'current page') + '"',
+    bookmark_search: () => 'Search bookmarks "' + (action.query || '') + '"',
+    save_page: () => 'Save page as MHTML archive',
+    screenshot_save: () => 'Save screenshot "' + (action.label || '') + '"',
+    organize_tabs: () => 'Organize tabs (' + (action.mode || 'group') + ')',
     read_later_add: () => 'Add "' + (action.title || action.url || 'page') + '" to reading list',
-    read_later_list:() => 'Show reading list',
-    monitor_start:  () => 'Monitor page every ' + (action.intervalMin || 15) + ' min' + (action.checkText ? ` for "${action.checkText}"` : ''),
-    use_skill:      () => 'Activate skill "' + (action.id || action.skill || '') + '"',
-    list_tabs:      () => 'List open tabs',
-    ask_website:    () => 'Search this page for "' + String(action.query || '').substring(0, 50) + '"',
+    read_later_list: () => 'Show reading list',
+    monitor_start: () => 'Monitor page every ' + (action.intervalMin || 15) + ' min' + (action.checkText ? ` for "${action.checkText}"` : ''),
+    use_skill: () => 'Activate skill "' + (action.id || action.skill || '') + '"',
+    list_tabs: () => 'List open tabs',
+    ask_website: () => 'Search this page for "' + String(action.query || '').substring(0, 50) + '"',
     highlight_element: () => 'Highlight section ' + (action.id || ''),
-    find_history:   () => 'Search history for "' + String(action.query || '').substring(0, 50) + '"',
-    done:           () => 'Done',
+    find_history: () => 'Search history for "' + String(action.query || '').substring(0, 50) + '"',
+    autofill_form: () => 'Autofill form details from stored profile',
+    fill_form: () => 'Autofill form details from stored profile',
+    done: () => 'Done',
   };
   return (map[action.type] ?? (() => action.type))();
 }

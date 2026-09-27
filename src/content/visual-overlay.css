@@ -1,0 +1,369 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   TechyMind — Visual Agency In-Page Overlay Stylesheet
+   Delivers high-tech gliding cursor, target bracket highlighter, and ripples.
+   Hardware accelerated, zero-layout-shift, strict pointer-events: none.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── 1. The Gliding AI Cursor Pointer ── */
+#techymind-ai-cursor,
+#__techymind_cursor__ {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 32px !important;
+  height: 32px !important;
+  margin-top: -3px !important;
+  margin-left: -3px !important;
+  pointer-events: none !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  z-index: 2147483647 !important;
+  opacity: 0;
+  transform: translate3d(-100px, -100px, 0);
+  transition: transform 0.26s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.22s ease !important;
+  will-change: transform, opacity !important;
+  filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.45)) drop-shadow(0 0 10px rgba(56, 189, 248, 0.65));
+}
+
+#techymind-ai-cursor.techymind-cursor-visible,
+#__techymind_cursor__.techymind-cursor-visible {
+  opacity: 1 !important;
+}
+
+#techymind-ai-cursor.techymind-cursor-clicking,
+#__techymind_cursor__.techymind-cursor-clicking {
+  transform-origin: 3px 3px !important;
+  filter: drop-shadow(0 0 16px rgba(56, 189, 248, 0.95)) !important;
+}
+
+/* Cursor SVG internal elements */
+.techymind-cursor-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Pulsing radar ring on cursor tip */
+.techymind-cursor-pulse {
+  position: absolute;
+  top: -12px;
+  left: -12px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(56, 189, 248, 0.7);
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.6);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.techymind-cursor-pulsing .techymind-cursor-pulse {
+  animation: techymindCursorPulseAnim 1.6s cubic-bezier(0.1, 0.8, 0.3, 1) infinite;
+}
+
+@keyframes techymindCursorPulseAnim {
+  0% {
+    transform: scale(0.3);
+    opacity: 1;
+  }
+  60% {
+    transform: scale(1.6);
+    opacity: 0.3;
+  }
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+
+/* Attached mini status pill next to cursor pointer */
+#techymind-cursor-badge {
+  position: absolute;
+  top: 22px;
+  left: 20px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  background: rgba(15, 23, 42, 0.88);
+  backdrop-filter: blur(12px) saturate(180%);
+  -webkit-backdrop-filter: blur(12px) saturate(180%);
+  border: 0.5px solid rgba(56, 189, 248, 0.45);
+  border-radius: 12px;
+  color: #f8fafc;
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'SF Pro Text', sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4), 0 0 8px rgba(56, 189, 248, 0.25);
+  pointer-events: none !important;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+#techymind-cursor-badge.techymind-badge-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.techymind-badge-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #38bdf8;
+  box-shadow: 0 0 6px #38bdf8;
+  flex-shrink: 0;
+}
+
+/* ── 2. The Target Bracket Highlighter ── */
+#techymind-target-highlight,
+#__techymind_target_highlight__ {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 0 !important;
+  height: 0 !important;
+  pointer-events: none !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  z-index: 2147483646 !important;
+  opacity: 0;
+  transform: scale(0.97);
+  transition:
+    top 0.22s cubic-bezier(0.22, 1, 0.36, 1),
+    left 0.22s cubic-bezier(0.22, 1, 0.36, 1),
+    width 0.22s cubic-bezier(0.22, 1, 0.36, 1),
+    height 0.22s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.2s ease,
+    transform 0.2s cubic-bezier(0.22, 1, 0.36, 1) !important;
+  border-radius: 6px;
+  box-sizing: border-box !important;
+}
+
+#techymind-target-highlight.techymind-target-visible,
+#__techymind_target_highlight__.techymind-target-visible {
+  opacity: 1 !important;
+  transform: scale(1) !important;
+}
+
+/* Corner bracket tick marks */
+.techymind-corner-bracket {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border-style: solid;
+  pointer-events: none;
+  box-sizing: border-box;
+  transition: border-color 0.2s ease;
+}
+
+.techymind-corner-tl {
+  top: -2px;
+  left: -2px;
+  border-width: 2.5px 0 0 2.5px;
+  border-top-left-radius: 5px;
+}
+
+.techymind-corner-tr {
+  top: -2px;
+  right: -2px;
+  border-width: 2.5px 2.5px 0 0;
+  border-top-right-radius: 5px;
+}
+
+.techymind-corner-bl {
+  bottom: -2px;
+  left: -2px;
+  border-width: 0 0 2.5px 2.5px;
+  border-bottom-left-radius: 5px;
+}
+
+.techymind-corner-br {
+  bottom: -2px;
+  right: -2px;
+  border-width: 0 2.5px 2.5px 0;
+  border-bottom-right-radius: 5px;
+}
+
+/* Semi-transparent target fill with scanlines */
+.techymind-target-fill {
+  position: absolute;
+  inset: 0;
+  border-radius: 5px;
+  pointer-events: none;
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+/* Target Header Tag Pill */
+.techymind-target-header {
+  position: absolute;
+  top: -28px;
+  left: -2px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  background: rgba(15, 23, 42, 0.92);
+  backdrop-filter: blur(14px) saturate(180%);
+  -webkit-backdrop-filter: blur(14px) saturate(180%);
+  border-radius: 6px;
+  color: #ffffff;
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'SF Pro Text', sans-serif;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  transition: all 0.2s ease;
+  z-index: 10;
+}
+
+.techymind-header-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* Semantic Color Themes */
+
+/* Theme: Action / Safe (Default Cyan) */
+.techymind-theme-action .techymind-corner-bracket {
+  border-color: #38bdf8;
+  filter: drop-shadow(0 0 4px rgba(56, 189, 248, 0.8));
+}
+.techymind-theme-action .techymind-target-fill {
+  background: rgba(56, 189, 248, 0.08);
+  box-shadow: inset 0 0 14px rgba(56, 189, 248, 0.2), 0 0 12px rgba(56, 189, 248, 0.25);
+  border: 1px solid rgba(56, 189, 248, 0.4);
+}
+.techymind-theme-action .techymind-target-header {
+  border: 1px solid rgba(56, 189, 248, 0.5);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4), 0 0 10px rgba(56, 189, 248, 0.35);
+}
+.techymind-theme-action .techymind-header-dot {
+  background: #38bdf8;
+  box-shadow: 0 0 8px #38bdf8;
+}
+
+/* Theme: Verified / Clicked (Emerald Green) */
+.techymind-theme-success .techymind-corner-bracket {
+  border-color: #10b981;
+  filter: drop-shadow(0 0 4px rgba(16, 185, 129, 0.8));
+}
+.techymind-theme-success .techymind-target-fill {
+  background: rgba(16, 185, 129, 0.1);
+  box-shadow: inset 0 0 14px rgba(16, 185, 129, 0.25), 0 0 12px rgba(16, 185, 129, 0.3);
+  border: 1px solid rgba(16, 185, 129, 0.45);
+}
+.techymind-theme-success .techymind-target-header {
+  border: 1px solid rgba(16, 185, 129, 0.5);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4), 0 0 10px rgba(16, 185, 129, 0.35);
+}
+.techymind-theme-success .techymind-header-dot {
+  background: #10b981;
+  box-shadow: 0 0 8px #10b981;
+}
+
+/* Theme: PII / Sensitive / Password (Warm Amber & Rose) */
+.techymind-theme-pii .techymind-corner-bracket {
+  border-color: #f59e0b;
+  filter: drop-shadow(0 0 4px rgba(245, 158, 11, 0.8));
+}
+.techymind-theme-pii .techymind-target-fill {
+  background: rgba(245, 158, 11, 0.1);
+  box-shadow: inset 0 0 14px rgba(245, 158, 11, 0.25), 0 0 12px rgba(245, 158, 11, 0.35);
+  border: 1px solid rgba(245, 158, 11, 0.5);
+}
+.techymind-theme-pii .techymind-target-header {
+  border: 1px solid rgba(245, 158, 11, 0.6);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4), 0 0 10px rgba(245, 158, 11, 0.4);
+}
+.techymind-theme-pii .techymind-header-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 8px #f59e0b;
+}
+
+/* Theme: Observe / Inspect (Violet) */
+.techymind-theme-observe .techymind-corner-bracket {
+  border-color: #8b5cf6;
+  filter: drop-shadow(0 0 4px rgba(139, 92, 246, 0.8));
+}
+.techymind-theme-observe .techymind-target-fill {
+  background: rgba(139, 92, 246, 0.08);
+  box-shadow: inset 0 0 14px rgba(139, 92, 246, 0.2), 0 0 12px rgba(139, 92, 246, 0.25);
+  border: 1px solid rgba(139, 92, 246, 0.4);
+}
+.techymind-theme-observe .techymind-target-header {
+  border: 1px solid rgba(139, 92, 246, 0.5);
+}
+.techymind-theme-observe .techymind-header-dot {
+  background: #8b5cf6;
+  box-shadow: 0 0 8px #8b5cf6;
+}
+
+/* ── 3. High-Contrast Concentric Click Ripples ── */
+.techymind-click-ripple,
+.techymind-visual-ripple {
+  position: fixed !important;
+  pointer-events: none !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  z-index: 2147483647 !important;
+  border-radius: 50% !important;
+  box-sizing: border-box !important;
+  transform: translate(-50%, -50%) scale(0.15);
+  animation: techymindMultiRipple 0.65s cubic-bezier(0.12, 0.8, 0.32, 1) forwards !important;
+}
+
+@keyframes techymindMultiRipple {
+  0% {
+    width: 24px;
+    height: 24px;
+    transform: translate(-50%, -50%) scale(0.2);
+    opacity: 1;
+    border: 3px solid #38bdf8;
+    background: rgba(56, 189, 248, 0.45);
+    box-shadow: 0 0 16px rgba(56, 189, 248, 0.8), inset 0 0 8px rgba(56, 189, 248, 0.5);
+  }
+  60% {
+    opacity: 0.7;
+    border-width: 2px;
+  }
+  100% {
+    width: 68px;
+    height: 68px;
+    transform: translate(-50%, -50%) scale(1.6);
+    opacity: 0;
+    border: 1px solid rgba(56, 189, 248, 0.1);
+    background: transparent;
+    box-shadow: 0 0 24px rgba(56, 189, 248, 0);
+  }
+}
+
+.techymind-click-ripple.ripple-success {
+  animation: techymindMultiRippleSuccess 0.65s cubic-bezier(0.12, 0.8, 0.32, 1) forwards !important;
+}
+
+@keyframes techymindMultiRippleSuccess {
+  0% {
+    width: 24px;
+    height: 24px;
+    transform: translate(-50%, -50%) scale(0.2);
+    opacity: 1;
+    border: 3px solid #10b981;
+    background: rgba(16, 185, 129, 0.45);
+    box-shadow: 0 0 16px rgba(16, 185, 129, 0.8);
+  }
+  100% {
+    width: 72px;
+    height: 72px;
+    transform: translate(-50%, -50%) scale(1.6);
+    opacity: 0;
+    border: 1px solid rgba(16, 185, 129, 0.1);
+    background: transparent;
+  }
+}
