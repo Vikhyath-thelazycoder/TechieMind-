@@ -281,19 +281,37 @@ async function main() {
 
   // THRESHOLDS. This harness used to end in an unconditional process.exit(0),
   // so it reported PASS even when EVERY scenario failed to finish — a run with
-  // taskSuccessRatio 0 and executionSuccessRatio 0 still printed a green
-  // "[E2E] PASS". A suite that cannot fail is worse than no suite.
+  // taskSuccessRatio 0 still printed a green "[E2E] PASS". A suite that cannot
+  // fail is worse than no suite.
+  //
+  // Only metrics that DISCRIMINATE are gated. executionSuccessRatio is
+  // deliberately NOT one of them: it is derived from "[VERIFY: …]" log lines,
+  // and the scripted mock answers `is_complete: true` without executing a
+  // single browser action, so every step lands in NO_VERIFY_LINE and the ratio
+  // is structurally 0 for a perfectly healthy run. Gating on it would be the
+  // same mistake as the unconditional exit, just inverted — a threshold that
+  // can never be met.
   const MIN_TASK_SUCCESS = 0.5;
-  const MIN_EXEC_SUCCESS = 0.5;
+  const MIN_SANITIZE_P50 = 50;   // ms — below this, no real sanitization ran
+  const MAX_VLM_P50 = 5000;      // ms — above this the mock was not reached
   const failures = [];
   if (!(aggregate.taskSuccessRatio >= MIN_TASK_SUCCESS)) {
     failures.push(`taskSuccessRatio ${aggregate.taskSuccessRatio} < ${MIN_TASK_SUCCESS} (${results.filter(r => r.finished).length}/${results.length} scenarios finished)`);
   }
-  if (!(aggregate.executionSuccessRatio >= MIN_EXEC_SUCCESS)) {
-    failures.push(`executionSuccessRatio ${aggregate.executionSuccessRatio} < ${MIN_EXEC_SUCCESS}`);
-  }
   if (allSteps.length === 0) {
     failures.push('no steps were observed — the loop never ran');
+  }
+  // Hermeticity canaries. These catch the two silent hijacks documented in
+  // docs/RUNBOOK.md — a sub-10ms "VLM" means the MLX reflex answered instead
+  // of the mock, and a sub-50ms sanitize means redaction was skipped.
+  if (aggregate.vlmMs_mock.p50 > 0 && aggregate.vlmMs_mock.p50 < 10) {
+    failures.push(`vlmMs_mock p50 ${aggregate.vlmMs_mock.p50}ms < 10ms — the mock server was bypassed (MLX reflex or direct path)`);
+  }
+  if (aggregate.vlmMs_mock.p50 > MAX_VLM_P50) {
+    failures.push(`vlmMs_mock p50 ${aggregate.vlmMs_mock.p50}ms > ${MAX_VLM_P50}ms — the mock decision server was not reached`);
+  }
+  if (aggregate.sanitizeMs.p50 < MIN_SANITIZE_P50) {
+    failures.push(`sanitizeMs p50 ${aggregate.sanitizeMs.p50}ms < ${MIN_SANITIZE_P50}ms — sanitization did not really run`);
   }
 
   if (failures.length) {
